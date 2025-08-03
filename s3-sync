@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# S3 Sync Tool - Path Alias Script
+# This script allows running the sync tool from any directory
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Set the Python path to include the project directory
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+
+# Run the sync script with all arguments passed through
+python "$SCRIPT_DIR/scripts/sync.py" "$@" 

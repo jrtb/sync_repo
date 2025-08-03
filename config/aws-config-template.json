@@ -1,0 +1,87 @@
+{
+  "aws": {
+    "region": "us-east-1",
+    "profile": "s3-sync",
+    "credentials_file": "config/aws-credentials.json"
+  },
+  "s3": {
+    "bucket_name": "YOUR-BUCKET-NAME",
+    "sync_path": "/",
+    "storage_class": "STANDARD",
+    "encryption": {
+      "enabled": true,
+      "algorithm": "AES256"
+    },
+    "versioning": {
+      "enabled": true
+    },
+    "lifecycle": {
+      "enabled": true,
+      "rules": [
+        {
+          "id": "transition-to-ia",
+          "status": "Enabled",
+          "transition": {
+            "days": 30,
+            "storage_class": "STANDARD_IA"
+          }
+        },
+        {
+          "id": "transition-to-glacier",
+          "status": "Enabled",
+          "transition": {
+            "days": 90,
+            "storage_class": "GLACIER"
+          }
+        }
+      ]
+    }
+  },
+  "sync": {
+    "local_path": "./data",
+    "exclude_patterns": [
+      "*.tmp",
+      "*.log",
+      ".DS_Store",
+      "Thumbs.db",
+      "._*",
+      "*.swp",
+      "*.bak",
+      "desktop.ini",
+      ".DS_Store?",
+      "._.DS_Store"
+    ],
+    "include_patterns": [
+      "*"
+    ],
+    "max_concurrent_uploads": 10,
+    "chunk_size_mb": 100,
+    "retry_attempts": 3,
+    "dry_run": false
+  },
+  "monitoring": {
+    "cloudwatch": {
+      "enabled": true,
+      "namespace": "S3Sync",
+      "log_group": "/aws/s3-sync"
+    },
+    "logging": {
+      "level": "INFO",
+      "file": "logs/sync.log",
+      "max_size_mb": 100,
+      "backup_count": 5
+    }
+  },
+  "notifications": {
+    "email": {
+      "enabled": false,
+      "recipients": [],
+      "smtp_server": "",
+      "smtp_port": 587
+    },
+    "slack": {
+      "enabled": false,
+      "webhook_url": ""
+    }
+  }
+} 

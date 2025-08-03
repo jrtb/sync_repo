@@ -1,0 +1,83 @@
+{
+  "sync_settings": {
+    "mode": "incremental",
+    "dry_run": false,
+    "force_sync": false,
+    "delete_remote": false,
+    "preserve_timestamps": true,
+    "verify_checksums": true
+  },
+  "file_handling": {
+    "max_file_size": 5368709120,
+    "chunk_size": 8388608,
+    "concurrent_uploads": 5,
+    "timeout": 300,
+    "retry_attempts": 3,
+    "retry_delay": 5
+  },
+  "filters": {
+    "include_extensions": [
+      "*"
+    ],
+    "exclude_extensions": [
+      ".tmp",
+      ".log",
+      ".DS_Store",
+      ".swp",
+      ".bak",
+      "._*"
+    ],
+    "exclude_directories": [
+      ".git",
+      ".svn",
+      "node_modules",
+      "__pycache__",
+      ".cache"
+    ],
+    "exclude_files": [
+      "Thumbs.db",
+      ".DS_Store",
+      "desktop.ini",
+      "._.DS_Store",
+      "._*"
+    ]
+  },
+  "performance": {
+    "buffer_size": 8192,
+    "max_memory_usage": 1073741824,
+    "enable_compression": false,
+    "compression_level": 6
+  },
+  "monitoring": {
+    "progress_interval": 10,
+    "detailed_logging": true,
+    "performance_metrics": true,
+    "cost_tracking": true
+  },
+  "notifications": {
+    "email": {
+      "enabled": false,
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 587,
+      "username": "your-email@gmail.com",
+      "password": "your-app-password",
+      "recipients": ["admin@example.com"]
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+      "events": ["sync_start", "sync_complete", "sync_error"]
+    }
+  },
+  "backup": {
+    "create_backup": true,
+    "backup_location": "backup/",
+    "backup_retention_days": 30,
+    "backup_compression": true
+  },
+  "recovery": {
+    "enable_rollback": true,
+    "rollback_retention": 7,
+    "auto_restore": false
+  }
+} 
