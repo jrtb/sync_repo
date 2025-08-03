@@ -84,13 +84,14 @@ For every change made:
 - `docs/aws-cli-installation.md` - AWS CLI installation guide
 
 ### Scripts (Practical Implementation)
-- `scripts/setup-iam-user.py` - IAM user setup
+- `scripts/setup-iam-user.py` - IAM user setup ✅
 - `scripts/test-credentials.py` - Credential testing
 - `scripts/verify-production-setup.py` - Setup verification
 - `scripts/regenerate-credentials.py` - Credential management
 - `scripts/sync.py` - Main sync script ✅
 - `scripts/storage-class-manager.py` - Storage optimization ✅
 - `scripts/retry_failed_uploads.py` - Failed upload recovery ✅
+- `scripts/enable_versioning.py` - Bucket versioning management ✅
 
 ## Development Areas
 
@@ -106,6 +107,7 @@ For every change made:
 - Performance analytics and cost analysis
 - Automated alerting and reporting systems
 - Failed upload retry functionality with enhanced error handling
+- S3 bucket versioning with MFA delete protection ✅
 
 ### In Progress 🔄
 - Advanced security features
@@ -181,6 +183,12 @@ python scripts/storage-class-manager.py --analyze-costs
 # Optimize storage (dry run)
 python scripts/storage-class-manager.py --optimize-storage --dry-run
 
+# Enable bucket versioning
+python scripts/enable_versioning.py --bucket my-bucket-name
+
+# Check versioning status
+python scripts/enable_versioning.py --bucket my-bucket-name --check-status
+
 # Run all tests
 python run_tests.py
 
@@ -188,6 +196,7 @@ python run_tests.py
 python -m pytest tests/test_credentials.py
 python -m pytest tests/test_sync.py
 python -m pytest tests/test_storage_class_manager.py
+python -m pytest tests/test_versioning.py
 ```
 
 ## Security Reminders

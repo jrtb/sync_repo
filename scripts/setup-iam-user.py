@@ -287,6 +287,40 @@ class IAMUserSetup:
             print(f"❌ Failed to create S3 bucket '{self.bucket_name}'")
             return False
     
+    def apply_bucket_security(self):
+        """Apply security features to the S3 bucket including versioning"""
+        print(f"\n🔒 Setting up bucket security features for: {self.bucket_name}")
+        
+        try:
+            # Import security manager
+            from scripts.security_manager import SecurityManager
+            
+            # Create security manager
+            security_manager = SecurityManager()
+            
+            # Apply comprehensive security features
+            success = security_manager.apply_comprehensive_security(self.bucket_name)
+            
+            if success:
+                print(f"✅ Security features applied successfully to bucket '{self.bucket_name}'")
+                print("   - Server-side encryption enabled")
+                print("   - Bucket versioning enabled")
+                print("   - Public access blocked")
+                print("   - TLS/HTTPS enforcement enabled")
+                return True
+            else:
+                print(f"❌ Failed to apply security features to bucket '{self.bucket_name}'")
+                return False
+                
+        except ImportError:
+            print("⚠️  Security manager not available, skipping security features")
+            print("   You can manually enable versioning with:")
+            print(f"   aws s3api put-bucket-versioning --bucket {self.bucket_name} --versioning-configuration Status=Enabled")
+            return True  # Don't fail setup if security manager is not available
+        except Exception as e:
+            print(f"❌ Error applying security features: {e}")
+            return False
+    
     def setup(self):
         """Main setup process"""
         print("🚀 Starting IAM user setup for AWS S3 Sync Application")
@@ -298,6 +332,10 @@ class IAMUserSetup:
         
         # Create S3 bucket
         if not self.create_s3_bucket():
+            return False
+        
+        # Apply security features to bucket
+        if not self.apply_bucket_security():
             return False
         
         # Create IAM user
