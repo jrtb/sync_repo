@@ -36,11 +36,16 @@ import threading
 import random
 try:
     from scripts.logger import SyncLogger
+    from scripts.aws_identity import AWSIdentityVerifier
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from scripts.logger import SyncLogger
+    try:
+        from scripts.aws_identity import AWSIdentityVerifier
+    except ImportError:
+        AWSIdentityVerifier = None
 
 try:
     from tqdm import tqdm
@@ -574,6 +579,20 @@ class S3Sync:
         self.logger.log_info(f"Max retries: {self.max_retries}")
         self.logger.log_info(f"Hash algorithm: {self.hash_algorithm}")
         self.logger.log_info(f"Upload verification: {self.verify_upload}")
+        
+        # Verify AWS identity before proceeding
+        if AWSIdentityVerifier:
+            try:
+                identity_verifier = AWSIdentityVerifier(profile=self.profile, config=self.config)
+                if not identity_verifier.verify_identity_for_sync(bucket_name=self.bucket_name, dry_run=self.dry_run):
+                    self.logger.log_info("❌ Sync cancelled during identity verification")
+                    return False
+            except Exception as e:
+                self.logger.log_error(e, "AWS identity verification")
+                print(f"❌ AWS identity verification failed: {e}")
+                return False
+        else:
+            self.logger.log_info("⚠️  AWS identity verification module not available")
         
         # First, quickly discover all files (without S3 checks)
         discovered_files = self._discover_files()

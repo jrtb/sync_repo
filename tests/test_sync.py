@@ -558,11 +558,138 @@ class TestS3Sync:
             with patch.object(sync, '_upload_worker', return_value=True) as mock_worker:
                 with patch.object(sync, 'logger') as mock_logger:
                     with patch('builtins.input', return_value='y'):  # Mock input to avoid OSError
-                        result = sync.sync()
-                        
-                        assert result is True
-                        mock_worker.assert_called_once()
-                        mock_logger.log_info.assert_called()
+                        # Mock AWS identity verification
+                        with patch('scripts.sync.AWSIdentityVerifier') as mock_identity:
+                            mock_verifier = Mock()
+                            mock_verifier.verify_identity_for_sync.return_value = True
+                            mock_identity.return_value = mock_verifier
+                            
+                            result = sync.sync()
+                            
+                            assert result is True
+                            mock_worker.assert_called_once()
+                            mock_logger.log_info.assert_called()
+                            mock_verifier.verify_identity_for_sync.assert_called_once()
+    
+    def test_sync_identity_verification_success(self, temp_dir, mock_aws_session):
+        """Test sync with successful identity verification"""
+        sync = S3Sync()
+        sync.local_path = Path(temp_dir)
+        sync.bucket_name = "test-bucket"
+        sync.config = {
+            "sync": {
+                "exclude_patterns": []
+            }
+        }
+        
+        with patch.object(sync, '_get_files_to_sync', return_value=[]):
+            with patch.object(sync, 'logger') as mock_logger:
+                # Mock AWS identity verification at the module level
+                with patch('scripts.sync.AWSIdentityVerifier') as mock_identity_class:
+                    mock_verifier = Mock()
+                    mock_verifier.verify_identity_for_sync.return_value = True
+                    mock_identity_class.return_value = mock_verifier
+                    
+                    result = sync.sync()
+                    
+                    assert result is True
+                    mock_verifier.verify_identity_for_sync.assert_called_once_with(
+                        bucket_name="test-bucket", dry_run=False
+                    )
+    
+    def test_sync_identity_verification_failure(self, temp_dir, mock_aws_session):
+        """Test sync with failed identity verification"""
+        sync = S3Sync()
+        sync.local_path = Path(temp_dir)
+        sync.bucket_name = "test-bucket"
+        sync.config = {
+            "sync": {
+                "exclude_patterns": []
+            }
+        }
+        
+        with patch.object(sync, 'logger') as mock_logger:
+            # Mock AWS identity verification failure
+            with patch('scripts.sync.AWSIdentityVerifier') as mock_identity_class:
+                mock_verifier = Mock()
+                mock_verifier.verify_identity_for_sync.return_value = False
+                mock_identity_class.return_value = mock_verifier
+                
+                result = sync.sync()
+                
+                assert result is False
+                mock_verifier.verify_identity_for_sync.assert_called_once()
+    
+    def test_sync_identity_verification_exception(self, temp_dir, mock_aws_session):
+        """Test sync with identity verification exception"""
+        sync = S3Sync()
+        sync.local_path = Path(temp_dir)
+        sync.bucket_name = "test-bucket"
+        sync.config = {
+            "sync": {
+                "exclude_patterns": []
+            }
+        }
+        
+        with patch.object(sync, 'logger') as mock_logger:
+            # Mock AWS identity verification exception
+            with patch('scripts.sync.AWSIdentityVerifier') as mock_identity_class:
+                mock_identity_class.side_effect = Exception("Identity verification failed")
+                
+                result = sync.sync()
+                
+                assert result is False
+                mock_logger.log_error.assert_called()
+    
+    def test_sync_identity_verifier_not_available(self, temp_dir, mock_aws_session):
+        """Test sync when AWS identity verifier is not available"""
+        sync = S3Sync()
+        sync.local_path = Path(temp_dir)
+        sync.bucket_name = "test-bucket"
+        sync.config = {
+            "sync": {
+                "exclude_patterns": []
+            }
+        }
+        
+        with patch.object(sync, '_get_files_to_sync', return_value=[]):
+            with patch.object(sync, 'logger') as mock_logger:
+                # Mock AWS identity verifier as None
+                with patch('scripts.sync.AWSIdentityVerifier', None):
+                    result = sync.sync()
+                    
+                    assert result is True
+                    # Check that warning was logged
+                    warning_calls = [call for call in mock_logger.log_info.call_args_list 
+                                   if "AWS identity verification module not available" in str(call)]
+                    assert len(warning_calls) > 0
+    
+    def test_sync_dry_run_identity_verification(self, temp_dir, mock_aws_session):
+        """Test sync in dry run mode with identity verification"""
+        sync = S3Sync()
+        sync.local_path = Path(temp_dir)
+        sync.bucket_name = "test-bucket"
+        sync.dry_run = True
+        sync.config = {
+            "sync": {
+                "exclude_patterns": []
+            }
+        }
+        
+        with patch.object(sync, '_get_files_to_sync', return_value=[]):
+            with patch.object(sync, 'logger') as mock_logger:
+                # Mock AWS identity verification
+                with patch('scripts.sync.AWSIdentityVerifier') as mock_identity_class:
+                    mock_verifier = Mock()
+                    mock_verifier.verify_identity_for_sync.return_value = True
+                    mock_identity_class.return_value = mock_verifier
+                    
+                    result = sync.sync()
+                    
+                    assert result is True
+                    mock_verifier.verify_identity_for_sync.assert_called_once_with(
+                        bucket_name="test-bucket", dry_run=True
+                    )
     
     def test_print_summary(self, mock_aws_session):
         """Test sync summary printing"""
