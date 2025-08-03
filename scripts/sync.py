@@ -482,10 +482,24 @@ class S3Sync:
         return True
     
     def _calculate_s3_key(self, file_path):
-        """Calculate S3 key for a file, handling paths outside current directory"""
+        """Calculate S3 key for a file, ensuring valid S3 key format while preserving structure"""
+        # Convert string to Path if needed
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        
         try:
             # Try the standard relative_to method first
-            return str(file_path.relative_to(self.local_path))
+            relative_path = file_path.relative_to(self.local_path)
+            s3_key = str(relative_path)
+            
+            # Normalize path separators for S3
+            s3_key = s3_key.replace('\\', '/')
+            
+            # Remove any leading slashes
+            s3_key = s3_key.lstrip('/')
+            
+            return s3_key
+            
         except ValueError:
             # If relative_to fails (e.g., paths outside current directory), 
             # use absolute paths and create a normalized key
@@ -496,16 +510,46 @@ class S3Sync:
                 
                 # Calculate relative path using absolute paths
                 relative_path = abs_file_path.relative_to(abs_local_path)
-                return str(relative_path)
+                s3_key = str(relative_path)
+                
+                # Normalize path separators for S3
+                s3_key = s3_key.replace('\\', '/')
+                
+                # Remove any leading slashes
+                s3_key = s3_key.lstrip('/')
+                
+                return s3_key
+                
             except ValueError:
                 # If that still fails, create a key based on the file's absolute path
                 # This ensures we have a consistent key regardless of where the sync is run from
                 abs_file_path = file_path.resolve()
-                # Use the file's name and a hash of its parent directory to create a unique key
-                import hashlib
-                parent_dir = str(abs_file_path.parent)
-                parent_hash = hashlib.md5(parent_dir.encode()).hexdigest()[:8]
-                return f"{parent_hash}/{file_path.name}"
+                
+                # Try to create a meaningful key based on the file's location
+                # Use the last few components of the path to maintain some structure
+                path_parts = abs_file_path.parts
+                
+                # Find the astro directory in the path
+                try:
+                    astro_index = path_parts.index('astro')
+                    # Use everything from astro onwards, but remove the 'astro' prefix
+                    # to match existing S3 structure
+                    relevant_parts = path_parts[astro_index + 1:]  # Skip 'astro' itself
+                    s3_key = '/'.join(relevant_parts)
+                except ValueError:
+                    # If no astro directory found, use the last few path components
+                    if len(path_parts) >= 3:
+                        s3_key = '/'.join(path_parts[-3:])
+                    else:
+                        s3_key = file_path.name
+                
+                # Normalize path separators for S3
+                s3_key = s3_key.replace('\\', '/')
+                
+                # Remove any leading slashes
+                s3_key = s3_key.lstrip('/')
+                
+                return s3_key
     
     def _discover_files(self):
         """Quickly discover all files that would be synced (without S3 checks)"""
@@ -604,6 +648,15 @@ class S3Sync:
             
             # Track upload start time for speed calculation
             upload_start_time = datetime.now()
+            
+            # Validate S3 key before upload
+            if s3_key.startswith('../') or s3_key.startswith('..\\'):
+                self.logger.log_error(Exception(f"Invalid S3 key: {s3_key}"), f"upload validation for {local_file}")
+                self._update_stats(failed=True)
+                if self.dashboard:
+                    self.dashboard.increment_failed()
+                    self.dashboard.add_error(Exception(f"Invalid S3 key: {s3_key}"), local_file.name)
+                return False
             
             if self._upload_file(local_file, s3_key):
                 file_size = local_file.stat().st_size
