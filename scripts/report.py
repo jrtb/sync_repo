@@ -241,7 +241,17 @@ class SyncReporter:
         if self.cloudwatch_enabled:
             history_data.extend(self._collect_cloudwatch_sync_history(days))
         
-        return sorted(history_data, key=lambda x: x.get('timestamp', ''), reverse=True)
+        # Sort by timestamp, handling both timezone-aware and timezone-naive datetimes
+        def get_sortable_timestamp(item):
+            timestamp = item.get('timestamp', '')
+            if isinstance(timestamp, datetime):
+                # Convert to timezone-naive for comparison
+                if timestamp.tzinfo is not None:
+                    return timestamp.replace(tzinfo=None)
+                return timestamp
+            return timestamp
+        
+        return sorted(history_data, key=get_sortable_timestamp, reverse=True)
     
     def _collect_cost_data(self, days: int, bucket_name: str = None) -> Dict[str, Any]:
         """Collect cost data from AWS Cost Explorer and S3"""

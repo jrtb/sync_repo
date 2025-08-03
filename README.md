@@ -56,6 +56,19 @@ This repository contains **template files only**. Real credentials are:
 - Generated during setup (`config/aws-credentials.json`)
 - Never committed to version control
 
+### Security Setup
+Before using this system:
+
+1. **Never commit real credentials** - The `.gitignore` file prevents credential files from being committed
+2. **Use AWS CLI profiles** - Set up credentials using `aws configure --profile s3-sync`
+3. **Follow least-privilege principle** - The setup scripts create minimal IAM permissions
+4. **Enable encryption** - All S3 objects are encrypted by default
+5. **Monitor access** - CloudWatch logs track all operations
+
+**Template files included:**
+- `config/aws-config-template.json` - Copy to `config/aws-config.json` and customize
+- `config/aws-credentials-template.json` - Copy to `config/aws-credentials.json` and add real credentials
+
 ## Repository Structure
 
 ```
