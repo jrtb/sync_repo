@@ -41,10 +41,13 @@ def test_log_file_upload_and_skip(tmp_path):
 def test_log_verification_result(tmp_path):
     logger = SyncLogger("test-operation", config={})
     with patch.object(logger, 'logger') as mock_logger:
+        # Successful verifications should not log (reduced verbosity)
         logger.log_verification_result(Path("/tmp/file.txt"), "file.txt", True)
-        assert mock_logger.log.called
+        assert not mock_logger.log.called and not mock_logger.error.called
+        
+        # Failed verifications should still log
         logger.log_verification_result(Path("/tmp/file.txt"), "file.txt", False, details="hash mismatch")
-        assert mock_logger.log.called
+        assert mock_logger.error.called
 
 def test_cloudwatch_logging(tmp_path):
     config = {'logging': {'cloudwatch_enabled': True, 'log_group_name': 'test-group'}}

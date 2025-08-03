@@ -276,8 +276,7 @@ class SyncLogger:
     
     def log_verification_result(self, file_path: Path, s3_key: str, verification_passed: bool, 
                               details: str = None):
-        """Log file verification results"""
-        message = f"{'✅' if verification_passed else '❌'} Verification {'passed' if verification_passed else 'failed'}: {file_path.name}"
+        """Log file verification results - only log failures to reduce verbosity"""
         extra_fields = {
             'event_type': 'verification_result',
             'file_path': str(file_path),
@@ -286,13 +285,14 @@ class SyncLogger:
             'details': details
         }
         
-        level = 'INFO' if verification_passed else 'ERROR'
-        self.logger.log(
-            logging.ERROR if not verification_passed else logging.INFO,
-            message,
-            extra={'extra_fields': extra_fields}
-        )
-        self._log_to_cloudwatch(message, level, extra_fields)
+        # Only log verification failures to reduce verbosity
+        if not verification_passed:
+            message = f"❌ Verification failed: {file_path.name}"
+            if details:
+                message += f" - {details}"
+            
+            self.logger.error(message, extra={'extra_fields': extra_fields})
+            self._log_to_cloudwatch(message, 'ERROR', extra_fields)
     
     def log_sync_complete(self, final_stats: Dict[str, Any] = None):
         """Log sync operation completion with summary"""
