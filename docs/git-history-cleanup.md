@@ -66,7 +66,7 @@ git log --all --full-history -p | grep -E 'AKIA[0-9A-Z]{16}'
 git log --all --full-history -p | grep 'REMOVED_BUCKET_NAME '
 
 # Check for real account ID
-git log --all --full-history -p | grep '891377140797'
+git log --all --full-history -p | grep 'REMOVED_ACCOUNT_ID'
 ```
 
 ## Important Notes

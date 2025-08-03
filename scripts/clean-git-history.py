@@ -23,7 +23,7 @@ class GitHistoryCleaner:
             'config/aws-credentials.json',
             'AKIA[0-9A-Z]{16}',  # AWS access key pattern
             'REMOVED_BUCKET_NAME ',  # Real bucket name
-            '891377140797',  # Real account ID
+            'REMOVED_ACCOUNT_ID',  # Real account ID
         ]
         
     def check_bfg_available(self):
@@ -72,7 +72,7 @@ echo "⚠️  IMPORTANT: Run 'git push --force' to update remote repository"
             # Real bucket name
             'REMOVED_BUCKET_NAME ',
             # Real account ID
-            '891377140797',
+            'REMOVED_ACCOUNT_ID',
             # Real credentials (if any were committed)
             'ycLHdrC3csBcY27AmzVXoZB9pCyvzFt9iIpPa+OK',
         ]
@@ -153,7 +153,7 @@ echo "⚠️  IMPORTANT: Run 'git push --force' to update remote repository"
         try:
             result = subprocess.run([
                 'git', 'log', '--all', '--full-history', '-p',
-                '|', 'grep', '891377140797'
+                '|', 'grep', 'REMOVED_ACCOUNT_ID'
             ], shell=True, capture_output=True, text=True)
             
             if result.stdout.strip():
@@ -290,7 +290,7 @@ git log --all --full-history -p | grep -E 'AKIA[0-9A-Z]{16}'
 git log --all --full-history -p | grep 'REMOVED_BUCKET_NAME '
 
 # Check for real account ID
-git log --all --full-history -p | grep '891377140797'
+git log --all --full-history -p | grep 'REMOVED_ACCOUNT_ID'
 ```
 
 ## Important Notes
