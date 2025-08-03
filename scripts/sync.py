@@ -34,7 +34,13 @@ from botocore.exceptions import ClientError, NoCredentialsError, ConnectionError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import random
-from scripts.logger import SyncLogger
+try:
+    from scripts.logger import SyncLogger
+except ImportError:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from scripts.logger import SyncLogger
 
 try:
     from tqdm import tqdm
@@ -128,6 +134,22 @@ class S3Sync:
     
     def _get_current_costs(self):
         """Get current AWS S3 costs for accurate cost estimates"""
+        # Get storage class from configuration
+        storage_class = self.config.get('s3', {}).get('storage_class', 'STANDARD')
+        
+        # Storage class pricing (as of 2024)
+        storage_class_pricing = {
+            'STANDARD': 0.023,      # $0.023 per GB/month
+            'STANDARD_IA': 0.0125,  # $0.0125 per GB/month
+            'ONEZONE_IA': 0.01,     # $0.01 per GB/month
+            'INTELLIGENT_TIERING': 0.023,  # Same as STANDARD initially
+            'GLACIER': 0.004,       # $0.004 per GB/month
+            'DEEP_ARCHIVE': 0.00099 # $0.00099 per GB/month
+        }
+        
+        # Get pricing for configured storage class
+        storage_per_gb_month = storage_class_pricing.get(storage_class, 0.023)
+        
         try:
             # Initialize Cost Explorer client
             session = boto3.Session(profile_name=self.profile)
@@ -172,20 +194,24 @@ class S3Sync:
             return {
                 's3_monthly_cost': s3_cost,
                 'api_requests_per_1000': 0.0004,  # $0.0004 per 1,000 GET/HEAD requests
-                'data_transfer_per_gb': 0.09,      # $0.09 per GB
-                'storage_per_gb_month': 0.023,     # $0.023 per GB/month
+                'data_transfer_in_per_gb': 0.00,   # $0.00 per GB (FREE for uploads)
+                'data_transfer_out_per_gb': 0.09,  # $0.09 per GB (for downloads)
+                'storage_per_gb_month': storage_per_gb_month,
+                'storage_class': storage_class,
                 'cost_retrieved_at': now.isoformat()
             }
             
         except Exception as e:
             # Fallback to default pricing if cost data unavailable
             self.logger.log_info(f"⚠️  Could not retrieve current costs: {e}")
-            self.logger.log_info("📊 Using default AWS pricing for estimates")
+            self.logger.log_info(f"📊 Using {storage_class} pricing for estimates")
             return {
                 's3_monthly_cost': 0.0,
                 'api_requests_per_1000': 0.0004,
-                'data_transfer_per_gb': 0.09,
-                'storage_per_gb_month': 0.023,
+                'data_transfer_in_per_gb': 0.00,   # $0.00 per GB (FREE for uploads)
+                'data_transfer_out_per_gb': 0.09,  # $0.09 per GB (for downloads)
+                'storage_per_gb_month': storage_per_gb_month,
+                'storage_class': storage_class,
                 'cost_retrieved_at': 'default_pricing'
             }
     
@@ -630,6 +656,7 @@ class S3Sync:
         print(f"🪣 S3 Bucket: {self.bucket_name}")
         print(f"📊 Files to check: {total_files}")
         print(f"💾 Total size: {total_size:,} bytes ({total_size_gb:.3f} GB)")
+        print(f"🗄️  Storage class: {self.current_costs.get('storage_class', 'STANDARD')}")
         
         # Show current S3 costs if available
         if self.current_costs['s3_monthly_cost'] > 0:
@@ -646,11 +673,12 @@ class S3Sync:
             print("   (Shows what would be uploaded without actually uploading)")
         else:
             print("⚠️  REAL UPLOAD MODE - Will upload files that need syncing")
-            data_transfer_cost = total_size_gb * self.current_costs['data_transfer_per_gb']
+            data_transfer_cost = total_size_gb * self.current_costs['data_transfer_in_per_gb']  # FREE for uploads
             storage_cost_monthly = total_size_gb * self.current_costs['storage_per_gb_month']
-            print(f"   • Data transfer: ~${data_transfer_cost:.3f}")
-            print(f"   • Monthly storage: ~${storage_cost_monthly:.3f}/month")
-            print(f"   • Total upload cost: ~${data_transfer_cost:.3f}")
+            storage_class = self.current_costs.get('storage_class', 'STANDARD')
+            print(f"   • Data transfer (upload): ~${data_transfer_cost:.3f} (FREE)")
+            print(f"   • Monthly storage ({storage_class}): ~${storage_cost_monthly:.3f}/month")
+            print(f"   • Total upload cost: ~${data_transfer_cost:.3f} (FREE)")
         
         print("\n📋 Files to be checked:")
         for i, (local_file, s3_key) in enumerate(discovered_files[:10], 1):  # Show first 10 files
