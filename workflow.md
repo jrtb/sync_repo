@@ -88,8 +88,9 @@ For every change made:
 - `scripts/test-credentials.py` - Credential testing
 - `scripts/verify-production-setup.py` - Setup verification
 - `scripts/regenerate-credentials.py` - Credential management
-- `scripts/sync.py` - Main sync script (planned)
+- `scripts/sync.py` - Main sync script ✅
 - `scripts/storage-class-manager.py` - Storage optimization ✅
+- `scripts/retry_failed_uploads.py` - Failed upload recovery ✅
 
 ## Development Areas
 
@@ -104,6 +105,7 @@ For every change made:
 - Monitoring and reporting with CloudWatch integration
 - Performance analytics and cost analysis
 - Automated alerting and reporting systems
+- Failed upload retry functionality with enhanced error handling
 
 ### In Progress 🔄
 - Advanced security features
@@ -169,6 +171,9 @@ python scripts/regenerate-credentials.py
 
 # Test sync functionality
 python scripts/sync.py --dry-run
+
+# Retry failed uploads
+python scripts/retry_failed_uploads.py --dry-run --verbose --base-dir ..
 
 # Analyze storage costs
 python scripts/storage-class-manager.py --analyze-costs

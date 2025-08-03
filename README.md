@@ -89,6 +89,7 @@ sync_repo/
 - Concurrent uploads for performance
 - Dry-run mode for testing
 - Progress reporting and logging
+- Failed upload retry functionality with enhanced error handling
 
 ### Storage Class Optimization
 - **Standard**: Frequently accessed data

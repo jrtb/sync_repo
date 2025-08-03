@@ -31,6 +31,10 @@ python scripts/sync.py --dry-run
 python scripts/sync.py --local-path ./photos --bucket my-sync-bucket
 python scripts/sync.py --verbose
 python scripts/sync.py --config config/sync-config.json
+
+# Retry failed uploads
+python scripts/retry_failed_uploads.py --dry-run --verbose --base-dir ..
+python scripts/retry_failed_uploads.py --verbose --base-dir ..
 ```
 
 ### Storage Management
