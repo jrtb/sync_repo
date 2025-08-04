@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from botocore.exceptions import ClientError, NoCredentialsError, ConnectionError, ReadTimeoutError
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -59,9 +59,89 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
+class MetricsTracker:
+    """Track and display real-time sync metrics"""
+    
+    def __init__(self, total_files=0):
+        self.start_time = datetime.now()
+        self.total_files = total_files
+        self.processed_files = 0
+        self.failed_files = 0
+        self.bytes_processed = 0
+        self.last_update_time = self.start_time
+        self.last_processed_count = 0
+        self.lock = threading.Lock()
+        
+    def update(self, processed=0, failed=0, bytes_processed=0):
+        """Thread-safe metrics update"""
+        with self.lock:
+            self.processed_files += processed
+            self.failed_files += failed
+            self.bytes_processed += bytes_processed
+            
+    def get_metrics(self):
+        """Get current metrics as a formatted string"""
+        with self.lock:
+            current_time = datetime.now()
+            elapsed = current_time - self.start_time
+            elapsed_seconds = elapsed.total_seconds()
+            
+            # Calculate rates
+            files_per_second = 0
+            mb_per_second = 0
+            if elapsed_seconds > 0:
+                files_per_second = self.processed_files / elapsed_seconds
+                mb_per_second = (self.bytes_processed / (1024 * 1024)) / elapsed_seconds
+            
+            # Calculate ETA
+            eta_seconds = 0
+            if files_per_second > 0 and self.total_files > 0:
+                remaining_files = self.total_files - self.processed_files
+                eta_seconds = remaining_files / files_per_second
+            
+            # Recent rate (last 10 seconds)
+            recent_rate = 0
+            if elapsed_seconds > 10:
+                recent_elapsed = (current_time - self.last_update_time).total_seconds()
+                if recent_elapsed > 0:
+                    recent_processed = self.processed_files - self.last_processed_count
+                    recent_rate = recent_processed / recent_elapsed
+            
+            return {
+                'elapsed': elapsed,
+                'processed': self.processed_files,
+                'failed': self.failed_files,
+                'total': self.total_files,
+                'files_per_second': files_per_second,
+                'mb_per_second': mb_per_second,
+                'eta_seconds': eta_seconds,
+                'recent_rate': recent_rate,
+                'bytes_processed': self.bytes_processed
+            }
+    
+    def display_metrics(self):
+        """Display current metrics"""
+        metrics = self.get_metrics()
+        
+        # Format the display
+        elapsed_str = str(metrics['elapsed']).split('.')[0]  # Remove microseconds
+        eta_str = str(timedelta(seconds=int(metrics['eta_seconds']))) if metrics['eta_seconds'] > 0 else "N/A"
+        
+        print(f"\r📊 Progress: {metrics['processed']}/{metrics['total']} files "
+              f"({metrics['processed']/metrics['total']*100:.1f}%) | "
+              f"Speed: {metrics['files_per_second']:.1f} files/s "
+              f"({metrics['mb_per_second']:.1f} MB/s) | "
+              f"Elapsed: {elapsed_str} | ETA: {eta_str} | "
+              f"Failed: {metrics['failed']}", end='', flush=True)
+        
+        # Update last values for recent rate calculation
+        self.last_update_time = datetime.now()
+        self.last_processed_count = self.processed_files
+
 class S3Sync:
     def __init__(self, config_file=None, profile=None, bucket_name=None, 
-                 local_path=None, dry_run=False, verbose=False, no_confirm=False, skip_existing_check=False):
+                 local_path=None, dry_run=False, verbose=False, no_confirm=False, check_existing_files=False,
+                 max_concurrent_uploads=5, max_concurrent_checks=10):
         """Initialize S3 sync with configuration"""
         self.project_root = Path(__file__).parent.parent
         self.config = self._load_config(config_file)
@@ -71,7 +151,9 @@ class S3Sync:
         self.dry_run = dry_run or self.config.get('sync', {}).get('dry_run', False)
         self.verbose = verbose
         self.no_confirm = no_confirm
-        self.skip_existing_check = skip_existing_check
+        self.check_existing_files = check_existing_files
+        self.max_concurrent_uploads = max_concurrent_uploads
+        self.max_concurrent_checks = max_concurrent_checks
         
         # Retry configuration
         self.max_retries = self.config.get('sync', {}).get('max_retries', 3)
@@ -181,7 +263,6 @@ class S3Sync:
             self.ce_client = session.client('ce')
             
             # Get current month's S3 costs
-            from datetime import datetime, timedelta
             now = datetime.now()
             start_date = now.replace(day=1).strftime('%Y-%m-%d')
             end_date = (now.replace(day=1) + timedelta(days=32)).replace(day=1).strftime('%Y-%m-%d')
@@ -315,7 +396,7 @@ class S3Sync:
                 last_exception = e
                 
                 if attempt == self.max_retries:
-                    self.logger.error(f"Max retries ({self.max_retries}) exceeded")
+                    self.logger.log_error(Exception(f"Max retries ({self.max_retries}) exceeded"), "retry operation")
                     raise last_exception
                 
                 # Calculate delay with exponential backoff and jitter
@@ -611,18 +692,75 @@ class S3Sync:
                 s3_key = self._calculate_s3_key(file_path)
                 all_files.append((file_path, s3_key))
         
-        # Use progress bar for large file sets
-        if len(all_files) > 100 and TQDM_AVAILABLE:
-            self.logger.log_info(f"🔍 Checking {len(all_files)} files for changes...")
-            for file_path, s3_key in tqdm(all_files, desc="Checking files", unit="files", 
-                                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
+        if not all_files:
+            return files_to_sync
+        
+        # Use parallelism for file checking
+        max_workers = self.max_concurrent_checks
+        self.logger.log_info(f"🔍 Checking {len(all_files)} files for changes using {max_workers} parallel workers...")
+        
+        # Initialize metrics tracker
+        metrics_tracker = MetricsTracker(len(all_files))
+        
+        def check_file_worker(file_info):
+            """Worker function for checking if a file needs to be uploaded"""
+            file_path, s3_key = file_info
+            try:
                 if self._should_upload_file(file_path, s3_key):
-                    files_to_sync.append((file_path, s3_key))
-        else:
-            # For smaller file sets or when tqdm is not available, use verbose logging
-            for file_path, s3_key in all_files:
-                if self._should_upload_file(file_path, s3_key):
-                    files_to_sync.append((file_path, s3_key))
+                    metrics_tracker.update(processed=1, bytes_processed=file_path.stat().st_size)
+                    return file_info
+                else:
+                    metrics_tracker.update(processed=1)
+                    return None
+            except Exception as e:
+                metrics_tracker.update(failed=1)
+                # Don't log every individual error to avoid spam
+                if self.verbose:
+                    self.logger.log_error(e, f"checking file {file_path}")
+                return None
+        
+        # Use ThreadPoolExecutor for parallel file checking
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all file checking tasks
+            future_to_file = {executor.submit(check_file_worker, file_info): file_info for file_info in all_files}
+            
+            # Process completed futures with progress tracking
+            if len(all_files) > 100 and TQDM_AVAILABLE:
+                with tqdm(total=len(all_files), desc="Checking files", unit="files", 
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+                    for future in as_completed(future_to_file):
+                        try:
+                            result = future.result()
+                            if result:
+                                files_to_sync.append(result)
+                        except Exception as e:
+                            self.logger.log_error(e, "File check task failed")
+                        finally:
+                            pbar.update(1)
+            else:
+                # For smaller file sets, use metrics display
+                completed = 0
+                last_metrics_display = time.time()
+                
+                for future in as_completed(future_to_file):
+                    try:
+                        result = future.result()
+                        if result:
+                            files_to_sync.append(result)
+                    except Exception as e:
+                        self.logger.log_error(e, "File check task failed")
+                    finally:
+                        completed += 1
+                        
+                        # Update metrics display every 2 seconds
+                        current_time = time.time()
+                        if current_time - last_metrics_display >= 2.0:
+                            metrics_tracker.display_metrics()
+                            last_metrics_display = current_time
+                
+                # Final metrics display
+                metrics_tracker.display_metrics()
+                print()  # New line after metrics
         
         return files_to_sync
     
@@ -852,9 +990,9 @@ class S3Sync:
                 self.logger.log_error(e, "cleanup of invalid S3 objects")
         
         # Check for existing files with correct keys to provide better feedback
-        # Only do this in real sync mode, not dry run or test mode
+        # Only do this in real sync mode, not dry run or test mode, and only if explicitly requested
         existing_count = 0
-        if not self.dry_run and not self.verbose and not self.skip_existing_check:
+        if not self.dry_run and not self.verbose and self.check_existing_files:
             try:
                 # Add timeout to prevent hanging
                 import signal
@@ -877,8 +1015,8 @@ class S3Sync:
             except Exception as e:
                 self.logger.log_error(e, "check for existing files with correct keys")
                 existing_count = 0
-        elif self.skip_existing_check:
-            self.logger.log_info("⏭️  Skipping existing files check (--skip-existing-check specified)")
+        elif not self.check_existing_files:
+            self.logger.log_info("⏭️  Skipping existing files check (default behavior - use --check-existing-files to enable)")
         
         # First, quickly discover all files (without S3 checks)
         discovered_files = self._discover_files()
@@ -918,8 +1056,11 @@ class S3Sync:
         # Store files_to_sync for worker access
         self.files_to_sync = files_to_sync
         
+        # Initialize upload metrics tracker
+        upload_metrics = MetricsTracker(len(files_to_sync))
+        
         # Upload files with concurrency
-        max_workers = self.config.get('sync', {}).get('max_concurrent_uploads', 5)
+        max_workers = self.max_concurrent_uploads
         
         # Use dashboard for progress tracking
         if self.dashboard:
@@ -952,16 +1093,36 @@ class S3Sync:
                                 self.logger.log_error(e, "Upload task failed")
                                 pbar.update(1)
             else:
-                # For smaller operations, use traditional logging
+                # For smaller operations, use metrics display
+                self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
+                
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
                     
-                    # Process completed futures
+                    # Process completed futures with metrics display
+                    last_metrics_display = time.time()
                     for future in as_completed(futures):
                         try:
-                            future.result()
+                            result = future.result()
+                            if result:
+                                # Update metrics for successful upload
+                                upload_metrics.update(processed=1)
+                            else:
+                                # Update metrics for failed upload
+                                upload_metrics.update(failed=1)
                         except Exception as e:
                             self.logger.log_error(e, "Upload task failed")
+                            upload_metrics.update(failed=1)
+                        
+                        # Update metrics display every 2 seconds
+                        current_time = time.time()
+                        if current_time - last_metrics_display >= 2.0:
+                            upload_metrics.display_metrics()
+                            last_metrics_display = current_time
+                    
+                    # Final metrics display
+                    upload_metrics.display_metrics()
+                    print()  # New line after metrics
         
         self.stats['end_time'] = datetime.now()
         
@@ -1070,11 +1231,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/sync.py                    # Sync with default config
+  python scripts/sync.py                    # Sync with default config (fast)
   python scripts/sync.py --local-path ./photos --bucket my-sync-bucket
   python scripts/sync.py --dry-run          # Preview what would be uploaded
   python scripts/sync.py --config config/sync-config.json --verbose
   python scripts/sync.py --no-confirm       # Skip confirmation dialogue
+  python scripts/sync.py --check-existing-files  # Enable existing files check (slower)
         """
     )
     
@@ -1111,9 +1273,21 @@ Examples:
         help='Skip confirmation dialogue (useful for automated scripts)'
     )
     parser.add_argument(
-        '--skip-existing-check',
+        '--check-existing-files',
         action='store_true',
-        help='Skip checking for existing files in S3 (faster but less informative)'
+        help='Check for existing files in S3 before syncing (slower but provides statistics)'
+    )
+    parser.add_argument(
+        '--max-concurrent-uploads',
+        type=int,
+        default=5,
+        help='Maximum number of concurrent uploads (default: 5)'
+    )
+    parser.add_argument(
+        '--max-concurrent-checks',
+        type=int,
+        default=10,
+        help='Maximum number of concurrent file checks (default: 10)'
     )
     
     args = parser.parse_args()
@@ -1127,7 +1301,9 @@ Examples:
             dry_run=args.dry_run,
             verbose=args.verbose,
             no_confirm=args.no_confirm,
-            skip_existing_check=args.skip_existing_check
+            check_existing_files=args.check_existing_files,
+            max_concurrent_uploads=args.max_concurrent_uploads,
+            max_concurrent_checks=args.max_concurrent_checks
         )
         
         success = sync.sync()
