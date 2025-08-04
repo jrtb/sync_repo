@@ -214,8 +214,9 @@ class TestS3Sync:
             f.write(test_content)
 
         # Mock S3 ETag to be different from local file hash
+        # Use a different hash without dashes to simulate a changed file
         mock_s3_client.head_object.return_value = {
-            'ETag': '"different-hash"',
+            'ETag': '"differenthashwithoutdashes"',
             'ContentLength': len(test_content),
             'LastModified': 'now'
         }
@@ -225,6 +226,7 @@ class TestS3Sync:
         sync.bucket_name = "test-bucket"
 
         should_upload = sync._should_upload_file(test_file, "changed.txt")
+        # Since the ETag is different from the local file hash, it should upload
         assert should_upload is True
     
     def test_should_include_file_included(self, temp_dir, mock_aws_session):
@@ -460,7 +462,6 @@ class TestS3Sync:
         sync.bucket_name = "test-bucket"
         sync.local_path = Path(temp_dir)
         sync.files_to_sync = [(test_file, "test.txt")]  # Set files_to_sync for length check
-        sync.dashboard = None  # Disable dashboard to enable logging
         
         # Mock logger to capture output
         with patch.object(sync, 'logger') as mock_logger:
@@ -485,7 +486,6 @@ class TestS3Sync:
         sync.bucket_name = "test-bucket"
         sync.s3_client = mock_s3_client
         sync.files_to_sync = [(test_file, "test.txt")]  # Set files_to_sync for length check
-        sync.dashboard = None  # Disable dashboard to enable logging
         
         with patch.object(sync, '_upload_file', return_value=True) as mock_upload:
             with patch.object(sync, 'logger') as mock_logger:
@@ -831,14 +831,17 @@ class TestIntegration:
         temp_dir, data_dir = test_environment
 
         test_file = data_dir / "file1.txt"
+        test_content = "test content for file1"
+        test_file.write_text(test_content)
 
         # Get the mock client from the session
         mock_s3_client = mock_aws_session.return_value.client.return_value
 
         # Mock S3 to return different ETag (file changed)
+        # Use a hash without dashes to avoid multipart upload detection
         mock_s3_client.head_object.return_value = {
-            'ETag': '"different-hash"',
-            'ContentLength': len(test_file.read_text()),
+            'ETag': '"differenthashwithoutdashes"',
+            'ContentLength': len(test_content),
             'LastModified': 'now'
         }
 
@@ -851,10 +854,10 @@ class TestIntegration:
         assert should_upload is True
 
         # Mock S3 to return matching ETag (file unchanged)
-        expected_hash = hashlib.md5(test_file.read_text().encode()).hexdigest()
+        expected_hash = hashlib.md5(test_content.encode()).hexdigest()
         mock_s3_client.head_object.return_value = {
             'ETag': f'"{expected_hash}"',
-            'ContentLength': len(test_file.read_text()),
+            'ContentLength': len(test_content),
             'LastModified': 'now'
         }
 

@@ -38,7 +38,6 @@ import random
 try:
     from scripts.logger import SyncLogger
     from scripts.aws_identity import AWSIdentityVerifier
-    from scripts.dashboard import SyncDashboard
 except ImportError:
     import sys
     import os
@@ -48,10 +47,6 @@ except ImportError:
         from scripts.aws_identity import AWSIdentityVerifier
     except ImportError:
         AWSIdentityVerifier = None
-    try:
-        from scripts.dashboard import SyncDashboard
-    except ImportError:
-        SyncDashboard = None
 
 try:
     from tqdm import tqdm
@@ -187,10 +182,7 @@ class S3Sync:
         # Thread safety
         self.stats_lock = threading.Lock()
         
-        # Initialize dashboard if available
-        self.dashboard = None
-        if SyncDashboard:
-            self.dashboard = SyncDashboard('s3-sync', self.config)
+        # Dashboard functionality removed - using sequential output only
         
     def _load_config(self, config_file):
         """Load configuration from file"""
@@ -376,10 +368,22 @@ class S3Sync:
         if local_size != s3_metadata['size']:
             return True
         
-        # Compare hashes for integrity (S3 ETags are typically MD5)
-        local_md5 = self._calculate_file_hash(local_file, 'md5')
-        if local_md5 and local_md5 != s3_metadata['etag']:
-            return True
+        # For multipart uploads, S3 ETags are not reliable for hash comparison
+        # Instead, we'll use size comparison and rely on the upload verification
+        # that happens after upload to ensure integrity
+        
+        # Check if this is a multipart upload (ETag contains "-")
+        s3_etag = s3_metadata['etag']
+        if '-' in s3_etag:
+            # This is a multipart upload - we can't reliably compare hashes
+            # because S3 ETags for multipart uploads are not the same as file hashes
+            # We'll rely on size comparison and upload verification
+            return False
+        else:
+            # This is a simple upload - we can compare MD5 hashes
+            local_md5 = self._calculate_file_hash(local_file, 'md5')
+            if local_md5 and local_md5 != s3_etag:
+                return True
         
         return False
     
@@ -778,26 +782,13 @@ class S3Sync:
         local_file, s3_key = file_info
         
         try:
-            # Update dashboard with file info
-            if self.dashboard:
-                file_info = {
-                    'file_path': str(local_file),
-                    'file_size': local_file.stat().st_size,
-                    'file_name': local_file.name
-                }
-                self.dashboard.increment_processed()
-            
             if self.dry_run:
-                # Suppress individual file logging when dashboard is available
-                if self.verbose and len(self.files_to_sync) < 50 and not self.dashboard:
+                if self.verbose and len(self.files_to_sync) < 50:
                     self.logger.log_info(f"[DRY RUN] Would upload: {local_file} -> s3://{self.bucket_name}/{s3_key}")
                 self._update_stats(skipped=True)
-                if self.dashboard:
-                    self.dashboard.increment_skipped()
                 return True
             
-            # Suppress individual file logging when dashboard is available
-            if self.verbose and len(self.files_to_sync) < 50 and not self.dashboard:
+            if self.verbose and len(self.files_to_sync) < 50:
                 self.logger.log_info(f"Uploading: {local_file} -> s3://{self.bucket_name}/{s3_key}")
             
             # Track upload start time for speed calculation
@@ -807,9 +798,6 @@ class S3Sync:
             if s3_key.startswith('../') or s3_key.startswith('..\\'):
                 self.logger.log_error(Exception(f"Invalid S3 key: {s3_key}"), f"upload validation for {local_file}")
                 self._update_stats(failed=True)
-                if self.dashboard:
-                    self.dashboard.increment_failed()
-                    self.dashboard.add_error(Exception(f"Invalid S3 key: {s3_key}"), local_file.name)
                 return False
             
             if self._upload_file(local_file, s3_key):
@@ -822,30 +810,14 @@ class S3Sync:
                     upload_speed_mbps = (file_size / (1024 * 1024)) / upload_duration
                 
                 self._update_stats(uploaded=True, bytes_uploaded=file_size)
-                
-                # Update dashboard with upload success
-                if self.dashboard:
-                    self.dashboard.increment_uploaded(file_size)
-                    self.dashboard.update_progress(
-                        file_info=file_info,
-                        upload_speed=upload_speed_mbps,
-                        verification_status='passed' if self.verify_upload else 'skipped'
-                    )
-                
                 return True
             else:
                 self._update_stats(failed=True)
-                if self.dashboard:
-                    self.dashboard.increment_failed()
-                    self.dashboard.add_error(Exception("Upload failed"), local_file.name)
                 return False
                 
         except Exception as e:
             self.logger.log_error(e, f"Error uploading {local_file}")
             self._update_stats(failed=True)
-            if self.dashboard:
-                self.dashboard.increment_failed()
-                self.dashboard.add_error(e, local_file.name)
             return False
     
     def _cleanup_invalid_s3_objects(self):
@@ -948,10 +920,6 @@ class S3Sync:
         """Main sync operation"""
         self.stats['start_time'] = datetime.now()
         
-        # Start dashboard if available
-        if self.dashboard:
-            self.dashboard.start()
-        
         self.logger.log_info("🚀 Starting S3 sync operation")
         self.logger.log_info(f"Local path: {self.local_path}")
         self.logger.log_info(f"S3 bucket: {self.bucket_name}")
@@ -967,14 +935,10 @@ class S3Sync:
                 identity_verifier = AWSIdentityVerifier(profile=self.profile, config=self.config)
                 if not identity_verifier.verify_identity_for_sync(bucket_name=self.bucket_name, dry_run=self.dry_run):
                     self.logger.log_info("❌ Sync cancelled during identity verification")
-                    if self.dashboard:
-                        self.dashboard.stop()
                     return False
             except Exception as e:
                 self.logger.log_error(e, "AWS identity verification")
                 print(f"❌ AWS identity verification failed: {e}")
-                if self.dashboard:
-                    self.dashboard.stop()
                 return False
         elif not self.verbose:
             self.logger.log_info("⚠️  AWS identity verification module not available")
@@ -1019,10 +983,10 @@ class S3Sync:
         # First, quickly discover all files (without S3 checks)
         discovered_files = self._discover_files()
         
+        self.logger.log_info(f"🔍 Discovered {len(discovered_files)} files")
+        
         if not discovered_files:
             self.logger.log_info("✅ No files found to sync")
-            if self.dashboard:
-                self.dashboard.stop()
             return True
         
         self.logger.log_info(f"📁 Found {len(discovered_files)} files to check")
@@ -1031,8 +995,6 @@ class S3Sync:
         if not self.no_confirm:
             if not self._show_confirmation_dialogue(discovered_files):
                 self.logger.log_info("❌ Sync cancelled by user")
-                if self.dashboard:
-                    self.dashboard.stop()
                 return False
         
         # Now do the expensive S3 checks to see which files actually need syncing
@@ -1041,15 +1003,9 @@ class S3Sync:
         
         if not files_to_sync:
             self.logger.log_info("✅ No files to sync - everything is up to date")
-            if self.dashboard:
-                self.dashboard.stop()
             return True
         
         self.logger.log_info(f"📁 Found {len(files_to_sync)} files that need syncing")
-        
-        # Set total files for dashboard
-        if self.dashboard:
-            self.dashboard.set_total_files(len(files_to_sync))
         
         # Store files_to_sync for worker access
         self.files_to_sync = files_to_sync
@@ -1060,75 +1016,56 @@ class S3Sync:
         # Upload files with concurrency
         max_workers = self.max_concurrent_uploads
         
-        # Use dashboard for progress tracking
-        if self.dashboard:
+        # Fallback to progress bar for large operations
+        if len(files_to_sync) > 50 and TQDM_AVAILABLE:
             self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
                 
-                # Process completed futures with dashboard updates
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        self.logger.log_error(e, "Upload task failed")
-        else:
-            # Fallback to progress bar for large operations
-            if len(files_to_sync) > 50 and TQDM_AVAILABLE:
-                self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
-                
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
-                    
-                    # Process completed futures with progress bar
-                    with tqdm(total=len(files_to_sync), desc="Uploading", unit="files") as pbar:
-                        for future in as_completed(futures):
-                            try:
-                                future.result()
-                                pbar.update(1)
-                            except Exception as e:
-                                self.logger.log_error(e, "Upload task failed")
-                                pbar.update(1)
-            else:
-                # For smaller operations, use metrics display
-                self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
-                
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
-                    
-                    # Process completed futures with metrics display
-                    last_metrics_display = time.time()
+                # Process completed futures with progress bar
+                with tqdm(total=len(files_to_sync), desc="Uploading", unit="files") as pbar:
                     for future in as_completed(futures):
                         try:
-                            result = future.result()
-                            if result:
-                                # Update metrics for successful upload
-                                upload_metrics.update(processed=1)
-                            else:
-                                # Update metrics for failed upload
-                                upload_metrics.update(failed=1)
+                            future.result()
+                            pbar.update(1)
                         except Exception as e:
                             self.logger.log_error(e, "Upload task failed")
+                            pbar.update(1)
+        else:
+            # For smaller operations, use metrics display
+            self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
+                
+                # Process completed futures with metrics display
+                last_metrics_display = time.time()
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        if result:
+                            # Update metrics for successful upload
+                            upload_metrics.update(processed=1)
+                        else:
+                            # Update metrics for failed upload
                             upload_metrics.update(failed=1)
-                        
-                        # Update metrics display every 2 seconds
-                        current_time = time.time()
-                        if current_time - last_metrics_display >= 2.0:
-                            upload_metrics.display_metrics()
-                            last_metrics_display = current_time
+                    except Exception as e:
+                        self.logger.log_error(e, "Upload task failed")
+                        upload_metrics.update(failed=1)
                     
-                    # Final metrics display
-                    upload_metrics.display_metrics()
-                    print()  # New line after metrics
+                    # Update metrics display every 2 seconds
+                    current_time = time.time()
+                    if current_time - last_metrics_display >= 2.0:
+                        upload_metrics.display_metrics()
+                        last_metrics_display = current_time
+                
+                # Final metrics display
+                upload_metrics.display_metrics()
+                print()  # New line after metrics
         
         self.stats['end_time'] = datetime.now()
-        
-        # Stop dashboard
-        if self.dashboard:
-            self.dashboard.stop()
-        else:
-            self._print_summary()
+        self._print_summary()
         
         return self.stats['files_failed'] == 0
     
@@ -1142,6 +1079,7 @@ class S3Sync:
         estimated_check_cost = (total_files / 1000) * self.current_costs['api_requests_per_1000']
         total_size_gb = total_size / 1024 / 1024 / 1024  # Convert to GB
         
+        # Console output
         print("\n" + "="*60)
         print("🔄 SYNC CONFIRMATION")
         print("="*60)
@@ -1220,7 +1158,7 @@ class S3Sync:
             print("✅ Sync completed successfully")
         else:
             print("⚠️  Sync completed with errors")
-        print("="*50)
+            print("="*50)
 
 def main():
     """Main entry point with argument parsing"""
@@ -1229,7 +1167,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/sync.py                    # Sync with default config (fast)
+  python scripts/sync.py                    # Sync with sequential output
   python scripts/sync.py --local-path ./photos --bucket my-sync-bucket
   python scripts/sync.py --dry-run          # Preview what would be uploaded
   python scripts/sync.py --config config/sync-config.json --verbose
@@ -1287,6 +1225,7 @@ Examples:
         default=10,
         help='Maximum number of concurrent file checks (default: 10)'
     )
+
     
     args = parser.parse_args()
     
