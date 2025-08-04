@@ -81,6 +81,8 @@ class SyncDashboard:
             'bytes_processed': 0,
             'upload_speed_mbps': 0.0,
             'average_speed_mbps': 0.0,
+            'peak_speed_mbps': 0.0,
+            'bandwidth_history': [],
             'verification_passed': 0,
             'verification_failed': 0,
             'verification_pending': 0,
@@ -159,6 +161,21 @@ class SyncDashboard:
             if upload_speed is not None:
                 self.progress_data['upload_speed_mbps'] = upload_speed
                 self.progress_data['performance_metrics']['upload_times'].append(upload_speed)
+                
+                # Track peak speed
+                if upload_speed > self.progress_data['peak_speed_mbps']:
+                    self.progress_data['peak_speed_mbps'] = upload_speed
+                
+                # Add to bandwidth history with timestamp
+                self.progress_data['bandwidth_history'].append({
+                    'speed': upload_speed,
+                    'timestamp': current_time,
+                    'bytes_uploaded': self.progress_data['bytes_uploaded']
+                })
+                
+                # Keep only last 100 bandwidth measurements
+                if len(self.progress_data['bandwidth_history']) > 100:
+                    self.progress_data['bandwidth_history'] = self.progress_data['bandwidth_history'][-100:]
                 
                 # Calculate average speed
                 if self.progress_data['performance_metrics']['upload_times']:
@@ -298,6 +315,15 @@ class SyncDashboard:
         bytes_gb = bytes_uploaded / (1024**3)
         bytes_mb = bytes_uploaded / (1024**2)
         
+        # Calculate bandwidth statistics
+        current_speed = self.progress_data['upload_speed_mbps']
+        avg_speed = self.progress_data['average_speed_mbps']
+        peak_speed = self.progress_data['peak_speed_mbps']
+        
+        # Calculate recent bandwidth trend (last 10 measurements)
+        recent_speeds = [entry['speed'] for entry in self.progress_data['bandwidth_history'][-10:]]
+        recent_avg = sum(recent_speeds) / len(recent_speeds) if recent_speeds else 0
+        
         progress_text = f"""
 [bold]Overall Progress:[/bold] {progress_percent:.1f}% ({processed}/{total_files})
 [bold]Upload Progress:[/bold] {upload_percent:.1f}% ({uploaded}/{total_files})
@@ -307,7 +333,12 @@ class SyncDashboard:
 
 [bold]💾 Data:[/bold]
   📦 Uploaded: {bytes_gb:.2f} GB ({bytes_mb:.1f} MB)
-  🚀 Speed: {self.progress_data['upload_speed_mbps']:.2f} Mbps (avg: {self.progress_data['average_speed_mbps']:.2f} Mbps)
+
+[bold]🚀 Bandwidth Usage:[/bold]
+  ⚡ Current: {current_speed:.2f} Mbps
+  📊 Average: {avg_speed:.2f} Mbps
+  🏆 Peak: {peak_speed:.2f} Mbps
+  📈 Recent Avg: {recent_avg:.2f} Mbps
 
 [bold]🔍 Verification:[/bold]
   ✅ Passed: {self.progress_data['verification_passed']} | ❌ Failed: {self.progress_data['verification_failed']} | ⏳ Pending: {self.progress_data['verification_pending']}
@@ -397,11 +428,17 @@ class SyncDashboard:
         progress_percent = (processed / total_files * 100) if total_files > 0 else 0
         bytes_gb = self.progress_data['bytes_uploaded'] / (1024**3)
         
+        # Calculate recent bandwidth trend
+        recent_speeds = [entry['speed'] for entry in self.progress_data['bandwidth_history'][-5:]]
+        recent_avg = sum(recent_speeds) / len(recent_speeds) if recent_speeds else 0
+        
         print(f"\r📊 Progress: {progress_percent:.1f}% | "
               f"📁 {processed}/{total_files} | "
               f"✅ {uploaded} | ⏭️ {skipped} | ❌ {failed} | "
               f"💾 {bytes_gb:.2f}GB | "
-              f"🚀 {self.progress_data['upload_speed_mbps']:.2f}Mbps", end="")
+              f"⚡ {self.progress_data['upload_speed_mbps']:.1f}Mbps | "
+              f"📊 {self.progress_data['average_speed_mbps']:.1f}Mbps | "
+              f"🏆 {self.progress_data['peak_speed_mbps']:.1f}Mbps", end="")
     
     def _print_final_summary(self):
         """Print final summary when dashboard stops"""
@@ -418,7 +455,10 @@ class SyncDashboard:
         print(f"  📁 Total Files: {total_files}")
         print(f"  ✅ Uploaded: {uploaded}")
         print(f"  💾 Data: {bytes_gb:.2f} GB")
-        print(f"  🚀 Avg Speed: {self.progress_data['average_speed_mbps']:.2f} Mbps")
+        print(f"  🚀 Bandwidth Stats:")
+        print(f"    📊 Average: {self.progress_data['average_speed_mbps']:.2f} Mbps")
+        print(f"    🏆 Peak: {self.progress_data['peak_speed_mbps']:.2f} Mbps")
+        print(f"    📈 Total Measurements: {len(self.progress_data['bandwidth_history'])}")
         print(f"  🔍 Verification: {self.progress_data['verification_passed']} passed, {self.progress_data['verification_failed']} failed")
     
     def set_total_files(self, total: int):
@@ -473,6 +513,8 @@ class SyncDashboard:
                 'bytes_uploaded': self.progress_data['bytes_uploaded'],
                 'upload_speed_mbps': self.progress_data['upload_speed_mbps'],
                 'average_speed_mbps': self.progress_data['average_speed_mbps'],
+                'peak_speed_mbps': self.progress_data['peak_speed_mbps'],
+                'bandwidth_measurements': len(self.progress_data['bandwidth_history']),
                 'verification_passed': self.progress_data['verification_passed'],
                 'verification_failed': self.progress_data['verification_failed'],
                 'errors_count': len(self.progress_data['errors']),

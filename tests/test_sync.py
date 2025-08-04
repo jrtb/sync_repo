@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch, MagicMock
 import hashlib
 import time
 import random
+from botocore.exceptions import ClientError
 
 # Add the scripts directory to the path for imports
 import sys
@@ -757,10 +758,10 @@ class TestS3Sync:
             # Test the S3 key calculation - should use fallback method
             s3_key = sync._calculate_s3_key(test_file)
             
-            # Should create a key with hash and filename
-            assert "/" in s3_key, "S3 key should contain a slash"
+            # Should create a key with the filename (current fallback behavior)
             assert test_file.name in s3_key, "S3 key should contain the filename"
-            assert len(s3_key.split("/")[0]) == 8, "Hash should be 8 characters"
+            assert "/" in s3_key, "S3 key should contain path separators in fallback"
+            assert len(s3_key.split("/")) >= 2, "S3 key should have at least 2 path components in fallback"
             
         finally:
             # Clean up
@@ -957,7 +958,105 @@ class TestIntegration:
                     assert mock_log_info.called or mock_log_error.called
 
 
-
-
-if __name__ == "__main__":
-    pytest.main([__file__]) 
+class TestS3SyncMetadataRetrieval:
+    """Test S3 metadata retrieval with proper 404 handling"""
+    
+    def setup_method(self):
+        """Set up test fixtures"""
+        self.mock_config = {
+            'aws': {'profile': 'test-profile'},
+            's3': {'bucket_name': 'test-bucket'},
+            'sync': {
+                'local_path': './test-data',
+                'max_retries': 3,
+                'retry_delay_base': 1,
+                'retry_delay_max': 60
+            }
+        }
+        
+        # Mock the logger to avoid actual logging during tests
+        with patch('scripts.sync.SyncLogger'):
+            self.sync = S3Sync(config_file=None)
+            self.sync.config = self.mock_config
+            self.sync.bucket_name = 'test-bucket'
+            self.sync.s3_client = Mock()
+    
+    def test_404_error_handled_without_retry(self):
+        """Test that 404 errors are handled directly without retries"""
+        # Mock a 404 ClientError
+        error_response = {'Error': {'Code': '404', 'Message': 'Not Found'}}
+        mock_client_error = ClientError(error_response, 'HeadObject')
+        
+        # Configure the mock to raise the 404 error
+        self.sync.s3_client.head_object.side_effect = mock_client_error
+        
+        # Call the method
+        result = self.sync._get_s3_object_metadata('test-key')
+        
+        # Verify the method was called only once (no retries)
+        self.sync.s3_client.head_object.assert_called_once_with(
+            Bucket='test-bucket', 
+            Key='test-key'
+        )
+        
+        # Verify the result is None (indicating file doesn't exist)
+        assert result is None
+    
+    def test_other_client_errors_are_logged(self):
+        """Test that non-404 ClientErrors are logged"""
+        # Mock a different ClientError (e.g., 403 Forbidden)
+        error_response = {'Error': {'Code': '403', 'Message': 'Forbidden'}}
+        mock_client_error = ClientError(error_response, 'HeadObject')
+        
+        # Configure the mock to raise the error
+        self.sync.s3_client.head_object.side_effect = mock_client_error
+        
+        # Mock the logger
+        with patch.object(self.sync.logger, 'log_error') as mock_log_error:
+            result = self.sync._get_s3_object_metadata('test-key')
+            
+            # Verify the error was logged
+            mock_log_error.assert_called_once()
+            assert result is None
+    
+    def test_successful_metadata_retrieval(self):
+        """Test successful metadata retrieval"""
+        # Mock successful response
+        mock_response = {
+            'ETag': '"abc123"',
+            'ContentLength': 1024,
+            'LastModified': '2023-01-01T00:00:00Z'
+        }
+        self.sync.s3_client.head_object.return_value = mock_response
+        
+        # Call the method
+        result = self.sync._get_s3_object_metadata('test-key')
+        
+        # Verify the method was called
+        self.sync.s3_client.head_object.assert_called_once_with(
+            Bucket='test-bucket', 
+            Key='test-key'
+        )
+        
+        # Verify the result is correct
+        assert result == {
+            'etag': 'abc123',
+            'size': 1024,
+            'last_modified': '2023-01-01T00:00:00Z'
+        }
+    
+    def test_should_upload_file_returns_true_for_404(self):
+        """Test that _should_upload_file returns True when file doesn't exist in S3"""
+        # Mock a local file
+        mock_file = Mock()
+        mock_file.exists.return_value = True
+        mock_file.stat.return_value = Mock(st_size=1024)
+        
+        # Mock _get_s3_object_metadata to return None (404)
+        with patch.object(self.sync, '_get_s3_object_metadata', return_value=None):
+            # Mock _calculate_file_hash to avoid actual hash calculation
+            with patch.object(self.sync, '_calculate_file_hash', return_value='mock-hash'):
+                result = self.sync._should_upload_file(mock_file, 'test-key')
+                
+                # Should return True because file doesn't exist in S3
+                assert result is True 

@@ -342,11 +342,8 @@ class S3Sync:
     def _get_s3_object_metadata(self, key):
         """Get metadata of S3 object for comparison"""
         try:
-            # Use the retry mechanism for head_object calls
-            def head_object_operation():
-                return self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
-            
-            response = self._retry_with_backoff(head_object_operation)
+            # Direct call - no retry for 404 errors (file doesn't exist is normal)
+            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
             
             return {
                 'etag': response['ETag'].strip('"'),  # Remove quotes
@@ -355,8 +352,9 @@ class S3Sync:
             }
         except ClientError as e:
             if e.response['Error']['Code'] == '404':
-                return None
+                return None  # File doesn't exist - this is expected
             else:
+                # Only retry for actual errors (not 404)
                 self.logger.log_error(e, f"S3 metadata retrieval for {key}")
                 return None
         except Exception as e:

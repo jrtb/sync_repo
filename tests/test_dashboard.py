@@ -323,6 +323,38 @@ class TestSyncDashboard:
         expected_avg = sum(upload_times) / len(upload_times)
         assert self.dashboard.progress_data['average_speed_mbps'] == expected_avg
 
+    def test_bandwidth_tracking_enhancements(self):
+        """Test enhanced bandwidth tracking including peak speed and history"""
+        # Test peak speed tracking
+        self.dashboard.update_progress(upload_speed=5.0)
+        assert self.dashboard.progress_data['peak_speed_mbps'] == 5.0
+        
+        self.dashboard.update_progress(upload_speed=10.0)
+        assert self.dashboard.progress_data['peak_speed_mbps'] == 10.0
+        
+        self.dashboard.update_progress(upload_speed=7.0)
+        assert self.dashboard.progress_data['peak_speed_mbps'] == 10.0  # Should remain at peak
+        
+        # Test bandwidth history
+        assert len(self.dashboard.progress_data['bandwidth_history']) == 3
+        assert self.dashboard.progress_data['bandwidth_history'][0]['speed'] == 5.0
+        assert self.dashboard.progress_data['bandwidth_history'][1]['speed'] == 10.0
+        assert self.dashboard.progress_data['bandwidth_history'][2]['speed'] == 7.0
+        
+        # Test bandwidth history limit (should keep only last 100)
+        for i in range(105):
+            self.dashboard.update_progress(upload_speed=float(i))
+        
+        assert len(self.dashboard.progress_data['bandwidth_history']) == 100
+        assert self.dashboard.progress_data['bandwidth_history'][-1]['speed'] == 104.0
+        
+        # Test progress summary includes new fields
+        summary = self.dashboard.get_progress_summary()
+        assert 'peak_speed_mbps' in summary
+        assert 'bandwidth_measurements' in summary
+        assert summary['peak_speed_mbps'] == 104.0
+        assert summary['bandwidth_measurements'] == 100
+
 
 class TestDashboardIntegration:
     """Test dashboard integration with sync operations"""
