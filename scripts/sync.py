@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import boto3
+from botocore.config import Config
 import hashlib
 import json
 import logging
@@ -60,7 +61,7 @@ except ImportError:
 
 class S3Sync:
     def __init__(self, config_file=None, profile=None, bucket_name=None, 
-                 local_path=None, dry_run=False, verbose=False, no_confirm=False):
+                 local_path=None, dry_run=False, verbose=False, no_confirm=False, skip_existing_check=False):
         """Initialize S3 sync with configuration"""
         self.project_root = Path(__file__).parent.parent
         self.config = self._load_config(config_file)
@@ -70,6 +71,7 @@ class S3Sync:
         self.dry_run = dry_run or self.config.get('sync', {}).get('dry_run', False)
         self.verbose = verbose
         self.no_confirm = no_confirm
+        self.skip_existing_check = skip_existing_check
         
         # Retry configuration
         self.max_retries = self.config.get('sync', {}).get('max_retries', 3)
@@ -131,7 +133,15 @@ class S3Sync:
         """Initialize AWS clients with proper error handling"""
         try:
             session = boto3.Session(profile_name=self.profile)
-            self.s3_client = session.client('s3')
+            
+            # Configure S3 client with proper timeouts
+            config = Config(
+                connect_timeout=30,  # 30 seconds to establish connection
+                read_timeout=60,     # 60 seconds to read response
+                retries={'max_attempts': 3, 'mode': 'adaptive'}
+            )
+            
+            self.s3_client = session.client('s3', config=config)
             self.s3_resource = session.resource('s3')
             
             # Test credentials
@@ -251,7 +261,12 @@ class S3Sync:
     def _get_s3_object_metadata(self, key):
         """Get metadata of S3 object for comparison"""
         try:
-            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
+            # Use the retry mechanism for head_object calls
+            def head_object_operation():
+                return self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
+            
+            response = self._retry_with_backoff(head_object_operation)
+            
             return {
                 'etag': response['ETag'].strip('"'),  # Remove quotes
                 'size': response['ContentLength'],
@@ -263,6 +278,9 @@ class S3Sync:
             else:
                 self.logger.log_error(e, f"S3 metadata retrieval for {key}")
                 return None
+        except Exception as e:
+            self.logger.log_error(e, f"S3 metadata retrieval for {key}")
+            return None
     
     def _should_upload_file(self, local_file, s3_key):
         """Determine if file should be uploaded based on comparison"""
@@ -747,12 +765,43 @@ class S3Sync:
                     s3_key = self._calculate_s3_key(file_path)
                     all_files.append((file_path, s3_key))
             
-            existing_files = 0
-            for file_path, s3_key in all_files:
-                if self._get_s3_object_metadata(s3_key):
-                    existing_files += 1
+            if not all_files:
+                self.logger.log_info("📊 No files found to check")
+                return 0
             
-            self.logger.log_info(f"📊 Found {existing_files} files already in S3 with correct keys")
+            self.logger.log_info(f"📊 Checking {len(all_files)} files for existing S3 objects...")
+            
+            existing_files = 0
+            checked_files = 0
+            
+            # Process files in batches to avoid overwhelming the API
+            batch_size = 50
+            for i in range(0, len(all_files), batch_size):
+                batch = all_files[i:i + batch_size]
+                
+                for file_path, s3_key in batch:
+                    try:
+                        # Add timeout to individual head_object calls
+                        if self._get_s3_object_metadata(s3_key):
+                            existing_files += 1
+                        
+                        checked_files += 1
+                        
+                        # Log progress every 100 files
+                        if checked_files % 100 == 0:
+                            self.logger.log_info(f"📊 Progress: {checked_files}/{len(all_files)} files checked, {existing_files} found in S3")
+                            
+                    except Exception as e:
+                        self.logger.log_error(e, f"checking S3 object for {s3_key}")
+                        # Continue with next file instead of failing completely
+                        checked_files += 1
+                        continue
+                
+                # Small delay between batches to avoid rate limiting
+                if i + batch_size < len(all_files):
+                    time.sleep(0.1)
+            
+            self.logger.log_info(f"📊 Found {existing_files} files already in S3 with correct keys (out of {checked_files} checked)")
             return existing_files
             
         except Exception as e:
@@ -805,11 +854,31 @@ class S3Sync:
         # Check for existing files with correct keys to provide better feedback
         # Only do this in real sync mode, not dry run or test mode
         existing_count = 0
-        if not self.dry_run and not self.verbose:
+        if not self.dry_run and not self.verbose and not self.skip_existing_check:
             try:
-                existing_count = self._check_existing_files_with_correct_keys()
+                # Add timeout to prevent hanging
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Existing files check timed out")
+                
+                # Set a 5-minute timeout for the existing files check
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(300)  # 5 minutes
+                
+                try:
+                    existing_count = self._check_existing_files_with_correct_keys()
+                finally:
+                    signal.alarm(0)  # Cancel the alarm
+                    
+            except TimeoutError:
+                self.logger.log_info("⚠️  Existing files check timed out - continuing with sync")
+                existing_count = 0
             except Exception as e:
                 self.logger.log_error(e, "check for existing files with correct keys")
+                existing_count = 0
+        elif self.skip_existing_check:
+            self.logger.log_info("⏭️  Skipping existing files check (--skip-existing-check specified)")
         
         # First, quickly discover all files (without S3 checks)
         discovered_files = self._discover_files()
@@ -1041,6 +1110,11 @@ Examples:
         action='store_true',
         help='Skip confirmation dialogue (useful for automated scripts)'
     )
+    parser.add_argument(
+        '--skip-existing-check',
+        action='store_true',
+        help='Skip checking for existing files in S3 (faster but less informative)'
+    )
     
     args = parser.parse_args()
     
@@ -1052,7 +1126,8 @@ Examples:
             local_path=args.local_path,
             dry_run=args.dry_run,
             verbose=args.verbose,
-            no_confirm=args.no_confirm
+            no_confirm=args.no_confirm,
+            skip_existing_check=args.skip_existing_check
         )
         
         success = sync.sync()
