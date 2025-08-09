@@ -13,5 +13,11 @@ pathlib2>=2.3.7; python_version < "3.4"
 # Progress bars for large operations
 tqdm>=4.64.0
 
+# Terminal UI rendering
+rich>=13.7.0
+
+# System metrics
+psutil>=5.9.0
+
 # Configuration validation
 jsonschema>=4.17.0 

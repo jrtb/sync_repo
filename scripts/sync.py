@@ -35,6 +35,8 @@ from botocore.exceptions import ClientError, NoCredentialsError, ConnectionError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import random
+from collections import Counter
+import select
 try:
     from scripts.logger import SyncLogger
     from scripts.aws_identity import AWSIdentityVerifier
@@ -54,6 +56,25 @@ try:
 except ImportError:
     TQDM_AVAILABLE = False
 
+# Optional rich dashboard
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.align import Align
+    from rich.progress_bar import ProgressBar
+    RICH_AVAILABLE = True
+except Exception:
+    RICH_AVAILABLE = False
+
+# Optional system metrics
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except Exception:
+    PSUTIL_AVAILABLE = False
+
 class MetricsTracker:
     """Track and display real-time sync metrics"""
     
@@ -66,6 +87,9 @@ class MetricsTracker:
         self.last_update_time = self.start_time
         self.last_processed_count = 0
         self.lock = threading.Lock()
+        # For bandwidth calc
+        self._last_bytes = 0
+        self._last_time = self.start_time
         
     def update(self, processed=0, failed=0, bytes_processed=0):
         """Thread-safe metrics update"""
@@ -94,13 +118,15 @@ class MetricsTracker:
                 remaining_files = self.total_files - self.processed_files
                 eta_seconds = remaining_files / files_per_second
             
-            # Recent rate (last 10 seconds)
+            # Recent rate (last window)
             recent_rate = 0
-            if elapsed_seconds > 10:
-                recent_elapsed = (current_time - self.last_update_time).total_seconds()
-                if recent_elapsed > 0:
-                    recent_processed = self.processed_files - self.last_processed_count
-                    recent_rate = recent_processed / recent_elapsed
+            recent_bandwidth_mb_s = 0
+            recent_elapsed = (current_time - self.last_update_time).total_seconds()
+            if recent_elapsed > 0:
+                recent_processed = self.processed_files - self.last_processed_count
+                recent_rate = recent_processed / recent_elapsed
+                delta_bytes = self.bytes_processed - self._last_bytes
+                recent_bandwidth_mb_s = (delta_bytes / (1024 * 1024)) / recent_elapsed
             
             return {
                 'elapsed': elapsed,
@@ -111,8 +137,13 @@ class MetricsTracker:
                 'mb_per_second': mb_per_second,
                 'eta_seconds': eta_seconds,
                 'recent_rate': recent_rate,
-                'bytes_processed': self.bytes_processed
+                'bytes_processed': self.bytes_processed,
+                'recent_bandwidth_mb_s': recent_bandwidth_mb_s
             }
+            # Advance snapshot so next call reflects a recent window
+            self.last_update_time = current_time
+            self.last_processed_count = self.processed_files
+            self._last_bytes = self.bytes_processed
     
     def display_metrics(self):
         """Display current metrics"""
@@ -132,6 +163,67 @@ class MetricsTracker:
         # Update last values for recent rate calculation
         self.last_update_time = datetime.now()
         self.last_processed_count = self.processed_files
+        self._last_bytes = self.bytes_processed
+
+class TerminalDashboard:
+    """Dashboard powered by rich when available; falls back to ANSI minimal mode."""
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled and sys.stdout.isatty()
+        self.console = Console(force_terminal=True) if self.enabled and RICH_AVAILABLE else None
+        self._live = None
+
+    def _render_table(self, title: str, rows: list[str], bar_percent: float | None = None) -> Panel:
+        width = self.console.width if self.console else None
+        table = Table.grid(padding=(0,1), expand=True)
+        # Optional embedded progress bar that fills available width
+        if bar_percent is not None and self.console:
+            pb = ProgressBar(total=100, completed=max(0,min(100,int(bar_percent))), pulse=False)
+            table.add_row(pb)
+        for r in rows:
+            table.add_row(r)
+        return Panel(Align.left(table), title=title, padding=(1,1), expand=True, width=width)
+
+    def render_blocks(self, blocks: list[tuple[str, list[str]]]):
+        if not self.enabled:
+            # Minimal fallback: print the last block's last line
+            if blocks and blocks[-1][1]:
+                print("\r" + blocks[-1][1][-1], end="", flush=True)
+            return
+        if self.console:
+            # Use rich Live
+            # Create stacked panels; use full width
+            panels = []
+            for title, lines in blocks:
+                # If the first item in lines is a tuple ("bar", percent), render bar_percent
+                bar_percent = None
+                if lines and isinstance(lines[0], tuple) and lines[0][0] == "bar":
+                    bar_percent = float(lines[0][1])
+                    lines = lines[1:]
+                panels.append(self._render_table(title, lines, bar_percent=bar_percent))
+            body = Table.grid(expand=True)
+            for p in panels:
+                body.add_row(p)
+            if self._live is None:
+                self._live = Live(body, console=self.console, refresh_per_second=10, transient=False, screen=True)
+                self._live.start()
+            else:
+                self._live.update(body)
+        else:
+            # Non-rich fallback: print simple lines
+            print("\n".join([" ".join(b[1]) for b in blocks]))
+
+    def stop(self):
+        if self._live is not None:
+            # Persist the last rendered frame on exit
+            try:
+                self._live.stop()
+            finally:
+                self._live = None
+
+def _format_progress_bar(percent: float, width: int = 30) -> str:
+    filled = int(width * max(0.0, min(1.0, percent / 100.0)))
+    return "[" + "#" * filled + "." * (width - filled) + "]"
 
 class S3Sync:
     def __init__(self, config_file=None, profile=None, bucket_name=None, 
@@ -176,13 +268,45 @@ class S3Sync:
             'bytes_uploaded': 0,
             'retries_attempted': 0,
             'start_time': None,
-            'end_time': None
+            'end_time': None,
+            'verifications_total': 0,
+            'verifications_passed': 0,
+            'file_type_counts': {},
+            'age_buckets': {}
         }
         
         # Thread safety
         self.stats_lock = threading.Lock()
         
-        # Dashboard functionality removed - using sequential output only
+        # Dashboard enabled by default; can be disabled via CLI flag or non-TTY
+        self.dashboard_enabled = True
+        # Global stop flag for 'q' to quit
+        self.stop_requested = False
+
+    def _bucket_file_age(self, file_path: Path) -> str:
+        """Return age bucket label for a file based on mtime."""
+        try:
+            mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+        except Exception:
+            return ">=1y"
+        days = (datetime.now() - mtime).days
+        if days < 1:
+            return "<1d"
+        if days < 7:
+            return "<1w"
+        if days < 30:
+            return "<1m"
+        if days < 180:
+            return "<6m"
+        if days < 365:
+            return "<1y"
+        return ">=1y"
+
+    def _record_file_type(self, file_path: Path):
+        ext = (file_path.suffix or '').lower() or 'noext'
+        counts = self.stats.get('file_type_counts') or {}
+        counts[ext] = counts.get(ext, 0) + 1
+        self.stats['file_type_counts'] = counts
         
     def _load_config(self, config_file):
         """Load configuration from file"""
@@ -549,9 +673,12 @@ class S3Sync:
             
             # Verify upload if enabled
             if success and self.verify_upload:
+                self.stats['verifications_total'] = self.stats.get('verifications_total', 0) + 1
                 if not self._verify_upload(local_file, s3_key):
                     self.logger.log_verification_result(local_file, s3_key, False, "verification failed")
                     return False
+                else:
+                    self.stats['verifications_passed'] = self.stats.get('verifications_passed', 0) + 1
             
             return success
             
@@ -664,18 +791,70 @@ class S3Sync:
         all_files = list(self.local_path.rglob('*'))
         
         # Use progress bar for large directories
-        if len(all_files) > 1000 and TQDM_AVAILABLE:
+        if len(all_files) > 1000 and TQDM_AVAILABLE and not self.dashboard_enabled:
             self.logger.log_info(f"🔍 Discovering files in {self.local_path}...")
             for file_path in tqdm(all_files, desc="Discovering files", unit="files"):
                 if file_path.is_file() and self._should_include_file(file_path):
                     s3_key = self._calculate_s3_key(file_path)
                     discovered_files.append((file_path, s3_key))
         else:
-            # For smaller directories, use traditional approach
+            # Dashboard-driven discovery
+            metrics = MetricsTracker(total_files=len(all_files))
+            dashboard = TerminalDashboard(enabled=self.dashboard_enabled)
+            last_metrics_display = time.time()
             for file_path in all_files:
                 if file_path.is_file() and self._should_include_file(file_path):
                     s3_key = self._calculate_s3_key(file_path)
                     discovered_files.append((file_path, s3_key))
+                    # Consider size as bytes processed for discovery preview
+                    try:
+                        size = file_path.stat().st_size
+                    except Exception:
+                        size = 0
+                    metrics.update(processed=1, bytes_processed=size)
+                else:
+                    metrics.update(processed=1)
+
+                # Periodic dashboard update
+                current_time = time.time()
+                if current_time - last_metrics_display >= 0.5:
+                    m = metrics.get_metrics()
+                    elapsed_str = str(m['elapsed']).split('.')[0]
+                    eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+                    percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+                    included = len(discovered_files)
+                    bar = _format_progress_bar(percent)
+                    blocks = [
+                        ("Discovery", [
+                            ("bar", percent),
+                            f"Files: {m['processed']}/{m['total']}  Included: {included}",
+                            f"Throughput: {m['mb_per_second']:.2f} MB/s  Files/s: {m['files_per_second']:.1f}",
+                            f"Elapsed: {elapsed_str}   ETA: {eta_str}",
+                            f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}"
+                        ])
+                    ]
+                    dashboard.render_blocks(blocks)
+                    last_metrics_display = current_time
+
+            # Final render
+            m = metrics.get_metrics()
+            elapsed_str = str(m['elapsed']).split('.')[0]
+            eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+            percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+            included = len(discovered_files)
+            bar = _format_progress_bar(percent)
+            blocks = [
+                ("Discovery", [
+                    ("bar", percent),
+                    f"Files: {m['processed']}/{m['total']}  Included: {included}",
+                    f"Throughput: {m['mb_per_second']:.2f} MB/s  Files/s: {m['files_per_second']:.1f}",
+                    f"Elapsed: {elapsed_str}   ETA: {eta_str}",
+                    f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}"
+                ])
+            ]
+            dashboard.render_blocks(blocks)
+            dashboard.stop()
+            print()
         
         return discovered_files
     
@@ -727,7 +906,7 @@ class S3Sync:
             future_to_file = {executor.submit(check_file_worker, file_info): file_info for file_info in all_files}
             
             # Process completed futures with progress tracking
-            if len(all_files) > 100 and TQDM_AVAILABLE:
+            if len(all_files) > 100 and TQDM_AVAILABLE and not self.dashboard_enabled:
                 with tqdm(total=len(all_files), desc="Checking files", unit="files", 
                          bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
                     for future in as_completed(future_to_file):
@@ -740,11 +919,43 @@ class S3Sync:
                         finally:
                             pbar.update(1)
             else:
-                # For smaller file sets, use metrics display
+                # For smaller file sets, use metrics display and also allow 'q' to quit
                 completed = 0
                 last_metrics_display = time.time()
+                dashboard = TerminalDashboard(enabled=self.dashboard_enabled)
+                stop_requested = False
+                def _poll_quit_key():
+                    nonlocal stop_requested
+                    self.stop_requested = False
+                    if not sys.stdin.isatty():
+                        return
+                    try:
+                        import termios, tty
+                        fd = sys.stdin.fileno()
+                        old = termios.tcgetattr(fd)
+                        try:
+                            tty.setcbreak(fd)
+                            while not stop_requested:
+                                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                                if r:
+                                    ch = sys.stdin.read(1)
+                                    if ch and ch.lower() == 'q':
+                                        stop_requested = True
+                                        self.stop_requested = True
+                                        break
+                        finally:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    except Exception:
+                        return
+                threading.Thread(target=_poll_quit_key, daemon=True).start()
                 
                 for future in as_completed(future_to_file):
+                    if stop_requested or self.stop_requested:
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except Exception:
+                            pass
+                        raise KeyboardInterrupt
                     try:
                         result = future.result()
                         if result:
@@ -757,12 +968,44 @@ class S3Sync:
                         # Update metrics display every 2 seconds
                         current_time = time.time()
                         if current_time - last_metrics_display >= 2.0:
-                            metrics_tracker.display_metrics()
+                            m = metrics_tracker.get_metrics()
+                            elapsed_str = str(m['elapsed']).split('.')[0]
+                            eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+                            percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+                            bar = _format_progress_bar(percent)
+                            cpu_line = f"CPU: {psutil.cpu_percent():.0f}%  Mem: {psutil.virtual_memory().percent:.0f}%" if PSUTIL_AVAILABLE else "CPU/Mem: n/a"
+                            blocks = [("Checking", [
+                                ("bar", percent),
+                                f"Files: {m['processed']}/{m['total']}  Failed: {m['failed']}",
+                                f"Throughput: {m['mb_per_second']:.2f} MB/s  Files/s: {m['files_per_second']:.1f}  {cpu_line}",
+                                f"Elapsed: {elapsed_str}   ETA: {eta_str}",
+                                f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}",
+                                "Press 'q' to stop"
+                            ])]
+                            dashboard.render_blocks(blocks)
                             last_metrics_display = current_time
                 
                 # Final metrics display
-                metrics_tracker.display_metrics()
-                print()  # New line after metrics
+                m = metrics_tracker.get_metrics()
+                elapsed_str = str(m['elapsed']).split('.')[0]
+                eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+                percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+                bar = _format_progress_bar(percent)
+                cpu_line = f"CPU: {psutil.cpu_percent():.0f}%  Mem: {psutil.virtual_memory().percent:.0f}%" if PSUTIL_AVAILABLE else "CPU/Mem: n/a"
+                blocks = [("Checking", [
+                    ("bar", percent),
+                    f"Files: {m['processed']}/{m['total']}  Failed: {m['failed']}",
+                    f"Throughput: {m['mb_per_second']:.2f} MB/s  Files/s: {m['files_per_second']:.1f}  {cpu_line}",
+                    f"Elapsed: {elapsed_str}   ETA: {eta_str}",
+                    f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}",
+                    "Press 'q' to stop"
+                ])]
+                dashboard.render_blocks(blocks)
+                dashboard.stop()
+                print()  # New line after metrics block
+                if stop_requested or self.stop_requested:
+                    # Bubble cancellation up to caller
+                    raise KeyboardInterrupt
         
         return files_to_sync
     
@@ -1016,8 +1259,20 @@ class S3Sync:
         # Upload files with concurrency
         max_workers = self.max_concurrent_uploads
         
+        # Precompute age bucket distribution for files to sync
+        from collections import Counter as _Counter
+        age_counts = _Counter()
+        for fp, _ in files_to_sync:
+            try:
+                bucket = self._bucket_file_age(fp)
+            except Exception:
+                bucket = ">=1y"
+            age_counts[bucket] += 1
+        ordered_keys = ["<1d","<1w","<1m","<6m","<1y",">=1y"]
+        self.stats['age_buckets'] = {k: age_counts.get(k, 0) for k in ordered_keys}
+
         # Fallback to progress bar for large operations
-        if len(files_to_sync) > 50 and TQDM_AVAILABLE:
+        if len(files_to_sync) > 50 and TQDM_AVAILABLE and not self.dashboard_enabled:
             self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1037,16 +1292,52 @@ class S3Sync:
             self.logger.log_info(f"🚀 Starting upload of {len(files_to_sync)} files...")
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(self._upload_worker, file_info) for file_info in files_to_sync]
+                future_to_file = {executor.submit(self._upload_worker, file_info): file_info for file_info in files_to_sync}
                 
                 # Process completed futures with metrics display
                 last_metrics_display = time.time()
-                for future in as_completed(futures):
+                dashboard = TerminalDashboard(enabled=self.dashboard_enabled)
+                # Key handling (q to quit) via non-blocking stdin polling
+                stop_requested = False
+                def _poll_quit_key():
+                    nonlocal stop_requested
+                    if not sys.stdin.isatty():
+                        return
+                    try:
+                        import termios, tty
+                        fd = sys.stdin.fileno()
+                        old = termios.tcgetattr(fd)
+                        try:
+                            tty.setcbreak(fd)
+                            while not stop_requested:
+                                r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                                if r:
+                                    ch = sys.stdin.read(1)
+                                    if ch and ch.lower() == 'q':
+                                        stop_requested = True
+                                        break
+                        finally:
+                            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    except Exception:
+                        # As a fallback, also honor KeyboardInterrupt from Ctrl+C
+                        return
+                threading.Thread(target=_poll_quit_key, daemon=True).start()
+                for future in as_completed(future_to_file):
+                    if stop_requested:
+                        break
                     try:
                         result = future.result()
+                        file_path, _ = future_to_file[future]
+                        file_size = 0
+                        try:
+                            file_size = file_path.stat().st_size
+                        except Exception:
+                            file_size = 0
                         if result:
                             # Update metrics for successful upload
-                            upload_metrics.update(processed=1)
+                            upload_metrics.update(processed=1, bytes_processed=file_size)
+                            # Track file type distribution
+                            self._record_file_type(file_path)
                         else:
                             # Update metrics for failed upload
                             upload_metrics.update(failed=1)
@@ -1056,13 +1347,68 @@ class S3Sync:
                     
                     # Update metrics display every 2 seconds
                     current_time = time.time()
-                    if current_time - last_metrics_display >= 2.0:
-                        upload_metrics.display_metrics()
+                    if current_time - last_metrics_display >= 0.5:
+                        m = upload_metrics.get_metrics()
+                        elapsed_str = str(m['elapsed']).split('.')[0]
+                        eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+                        percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+                        gb_uploaded = self.stats['bytes_uploaded'] / (1024 * 1024 * 1024)
+                        ver_total = self.stats.get('verifications_total', 0)
+                        ver_pass = self.stats.get('verifications_passed', 0)
+                        ver_pct = (ver_pass / ver_total * 100.0) if ver_total else 0.0
+                        # Top 3 file types
+                        ft_counts = Counter(self.stats.get('file_type_counts', {}))
+                        top_types = ", ".join(f"{ext}:{cnt}" for ext, cnt in ft_counts.most_common(3)) or "-"
+                        # Age buckets summary
+                        age_b = self.stats.get('age_buckets', {}) or {}
+                        age_line = ", ".join(f"{k}:{age_b.get(k,0)}" for k in ["<1d","<1w","<1m","<6m","<1y",">=1y"]) or "-"
+                        bar = _format_progress_bar(percent)
+                        cpu_line = f"CPU: {psutil.cpu_percent():.0f}%  Mem: {psutil.virtual_memory().percent:.0f}%" if PSUTIL_AVAILABLE else "CPU/Mem: n/a"
+                        blocks = [
+                            ("Upload (press 'q' to stop)", [
+                                ("bar", percent),
+                                f"Files: {m['processed']}/{m['total']}   Failed: {m['failed']}",
+                                f"Throughput: {m['recent_bandwidth_mb_s']:.2f} MB/s  Avg: {m['mb_per_second']:.2f} MB/s  Uploaded: {gb_uploaded:.2f} GB  {cpu_line}",
+                                f"Elapsed: {elapsed_str}   ETA: {eta_str}   Verify: {ver_pass}/{ver_total} ({ver_pct:.1f}%)",
+                                f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}"
+                            ]),
+                            ("Top Types", [top_types or "-"]),
+                            ("Age Buckets", [age_line or "-"])
+                        ]
+                        dashboard.render_blocks(blocks)
                         last_metrics_display = current_time
                 
-                # Final metrics display
-                upload_metrics.display_metrics()
-                print()  # New line after metrics
+                # Final metrics display (persisted by live screen=True)
+                m = upload_metrics.get_metrics()
+                elapsed_str = str(m['elapsed']).split('.')[0]
+                eta_str = str(timedelta(seconds=int(m['eta_seconds']))) if m['eta_seconds'] > 0 else "N/A"
+                percent = (m['processed'] / m['total'] * 100.0) if m['total'] else 0.0
+                gb_uploaded = self.stats['bytes_uploaded'] / (1024 * 1024 * 1024)
+                ver_total = self.stats.get('verifications_total', 0)
+                ver_pass = self.stats.get('verifications_passed', 0)
+                ver_pct = (ver_pass / ver_total * 100.0) if ver_total else 0.0
+                ft_counts = Counter(self.stats.get('file_type_counts', {}))
+                top_types = ", ".join(f"{ext}:{cnt}" for ext, cnt in ft_counts.most_common(3)) or "-"
+                age_b = self.stats.get('age_buckets', {}) or {}
+                age_line = ", ".join(f"{k}:{age_b.get(k,0)}" for k in ["<1d","<1w","<1m","<6m","<1y",">=1y"]) or "-"
+                bar = _format_progress_bar(percent)
+                cpu_line = f"CPU: {psutil.cpu_percent():.0f}%  Mem: {psutil.virtual_memory().percent:.0f}%" if PSUTIL_AVAILABLE else "CPU/Mem: n/a"
+                blocks = [
+                    ("Upload (press 'q' to stop)", [
+                        ("bar", percent),
+                        f"Files: {m['processed']}/{m['total']}   Failed: {m['failed']}",
+                        f"Throughput: {m['recent_bandwidth_mb_s']:.2f} MB/s  Avg: {m['mb_per_second']:.2f} MB/s  Uploaded: {gb_uploaded:.2f} GB  {cpu_line}",
+                        f"Elapsed: {elapsed_str}   ETA: {eta_str}   Verify: {ver_pass}/{ver_total} ({ver_pct:.1f}%)",
+                        f"Remaining: {max(0, m['total']-m['processed'])}  Recent Files/s: {m['recent_rate']:.1f}"
+                    ]),
+                    ("Top Types", [top_types or "-"]),
+                    ("Age Buckets", [age_line or "-"])
+                ]
+                dashboard.render_blocks(blocks)
+                dashboard.stop()
+                print()  # New line after metrics block
+                if stop_requested or self.stop_requested:
+                    raise KeyboardInterrupt
         
         self.stats['end_time'] = datetime.now()
         self._print_summary()
@@ -1225,6 +1571,11 @@ Examples:
         default=10,
         help='Maximum number of concurrent file checks (default: 10)'
     )
+    parser.add_argument(
+        '--no-dashboard',
+        action='store_true',
+        help='Disable the multi-line, in-place progress dashboard'
+    )
 
     
     args = parser.parse_args()
@@ -1242,6 +1593,8 @@ Examples:
             max_concurrent_uploads=args.max_concurrent_uploads,
             max_concurrent_checks=args.max_concurrent_checks
         )
+        # Propagate dashboard preference (enabled by default)
+        sync.dashboard_enabled = not bool(args.no_dashboard)
         
         success = sync.sync()
         sys.exit(0 if success else 1)
