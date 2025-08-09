@@ -1,15 +1,14 @@
-# AWS S3 Sync System
+# AWS S3 Sync – Full‑Screen TUI
 
-A comprehensive AWS S3 file synchronization and management system designed for both educational AWS certification study and practical file backup/sync operations.
+Modern, focused S3 file synchronization with a full‑screen terminal UI. The TUI provides a clear, BBS‑style overview, discovery/check progress, live logs, and a succinct summary.
 
-## What This System Does
+## What You Get
 
-Provides secure, cost-optimized file synchronization with:
-- **Complete AWS Integration**: IAM, S3, CloudWatch, and security services
-- **Storage Class Management**: Automatic cost optimization using S3 storage classes
-- **Security-First Design**: IAM roles, encryption, access policies, and monitoring
-- **Educational Focus**: Learn AWS concepts through practical implementation
-- **Production Ready**: Backup, restore, validation, and maintenance tools
+- **Full‑screen TUI** for end‑to‑end sync workflow
+- **Incremental and concurrent uploads** with verification
+- **Clear progress panes** for discovery, checking, and upload
+- **Minimal confirmations** inline in the log pane
+- **Cost hints** (current S3 month‑to‑date and basic estimates)
 
 ## AWS Concepts Covered
 
@@ -18,42 +17,29 @@ Provides secure, cost-optimized file synchronization with:
 - **CloudWatch**: Monitoring, logging, and metrics
 - **Security**: Encryption, access control, and best practices
 
-## Quick Start
+## Quick Start (TUI‑first)
 
 ### Prerequisites
-- Python 3.7+
+- Python 3.9+
 - AWS CLI installed and configured
-- AWS account with IAM permissions
+- An AWS profile (recommended: `s3-sync`)
 
-### Initial Setup
+### Run the TUI
 ```bash
-# 1. Clone the repository
-git clone <your-repo-url>
-cd sync_repo
+# Option A: Install a convenient shell alias (recommended)
+./install-path-alias.sh
+s3-sync --help
+s3-sync --local-path ./data --profile s3-sync
 
-# 2. Create IAM user and S3 bucket (automated setup)
-python scripts/setup-iam-user.py --bucket-name my-sync-bucket
-
-# 3. Test credentials and verify setup
-python scripts/test-credentials.py
-python scripts/verify-production-setup.py
-
-# 4. Initialize project structure
-python scripts/setup.py --init
+# Option B: Run directly
+python scripts/sync.py --help
+python scripts/sync.py --local-path ./data --profile s3-sync
 ```
-
-**What this creates**:
-- IAM user with minimal S3 permissions
-- S3 bucket with encryption and versioning
-- CloudWatch monitoring permissions
-- AWS CLI profile (`s3-sync`)
-- Secure credential storage (never committed to git)
-- Complete project structure and configurations
 
 ### Security Note
 This repository contains **template files only**. Real credentials are:
 - Stored in AWS CLI profiles (`~/.aws/credentials`)
-- Generated during setup (`config/aws-credentials.json`)
+- Optionally generated during setup
 - Never committed to version control
 
 ### Security Setup
@@ -72,11 +58,12 @@ Before using this system:
 ## Repository Structure
 
 ```
-sync_repo/
-├── scripts/           # Core sync and management scripts
-├── config/            # AWS and sync configuration
-├── docs/              # Educational documentation
-├── templates/         # IAM and bucket policy templates
+sync_repo_clean/
+├── scripts/           # TUI entrypoint (scripts/sync.py) and compatibility utilities
+├── core/              # Refactored sync engine and config loading
+├── tui/               # Full‑screen dashboard components
+├── config/            # Templates and config manager
+├── docs/              # Guides (with legacy overview in docs/LEGACY.md)
 ├── tests/             # Comprehensive test suite
 └── logs/              # Sync operation logs
 ```
@@ -84,12 +71,10 @@ sync_repo/
 ## Key Features
 
 ### Core Sync Engine
-- Incremental file synchronization to S3
+- Incremental file synchronization
 - Multipart uploads for large files
-- Concurrent uploads for performance
-- Dry-run mode for testing
-- Progress reporting and logging
-- Failed upload retry functionality with enhanced error handling
+- Concurrent uploads with progress callbacks
+- Verification and retries with exponential backoff
 
 ### Storage Class Optimization
 - **Standard**: Frequently accessed data
@@ -103,11 +88,9 @@ sync_repo/
 - Bucket versioning for data protection
 - Access logging and monitoring
 
-### Management Tools
-- Configuration management and validation
-- Backup and restore capabilities
-- Automated cleanup and maintenance
-- Comprehensive system validation
+### Legacy Utilities (Still Available)
+- Setup, validate, backup/restore, cleanup, storage‑class analysis, policy validation, and more remain for compatibility and tests.
+- See `docs/LEGACY.md` for the curated list and current status.
 
 ### Monitoring
 - CloudWatch metrics for sync operations
@@ -167,28 +150,7 @@ The repository includes safe template files:
 
 ## Installation Options
 
-### Option 1: Path Alias (Recommended)
-Install the `s3-sync` command to be available from any directory:
-
-```bash
-./install-path-alias.sh
-```
-
-After installation, you can use:
-```bash
-s3-sync --help                    # Show help
-s3-sync --dry-run                 # Preview sync
-s3-sync --local-path ./photos     # Sync specific directory
-```
-
-### Option 2: Direct Script Execution
-Run the sync script directly:
-
-```bash
-python scripts/sync.py --help
-python scripts/sync.py --dry-run
-python scripts/sync.py --local-path ./photos
-```
+See Quick Start above for both alias and direct execution options.
 
 ## Common Commands
 
@@ -207,16 +169,9 @@ python scripts/setup.py --init
 
 ### Sync Operations
 ```bash
-# Validate current setup
-python scripts/validate.py --all
-
-# Run sync operation
-python scripts/sync.py --local-path ./photos --dry-run  # Test first
-python scripts/sync.py --local-path ./photos            # Actual sync
-
-# Optimize storage costs
-python scripts/storage-class-manager.py --analyze-costs
-python scripts/storage-class-manager.py --optimize-storage --dry-run
+# Run the full‑screen TUI
+s3-sync --local-path ./photos --profile s3-sync --dry-run  # test first
+s3-sync --local-path ./photos --profile s3-sync            # actual sync
 ```
 
 ### Maintenance
@@ -269,24 +224,13 @@ aws configure list             # Show configuration
 
 ## Documentation
 
-### Core Documentation
-- **[System Overview](docs/system-overview.md)**: Complete system architecture and workflow integration
-- **[Usage Guide](docs/usage-guide.md)**: Complete walkthrough from setup to maintenance
-- **[Quick Reference](docs/quick-reference.md)**: Essential commands and concepts
+### Core Guides
+- [System Overview](docs/system-overview.md)
+- [Usage Guide](docs/usage-guide.md)
+- [Quick Reference](docs/quick-reference.md)
 
-### Setup and Configuration
-- **[AWS Setup](docs/aws-setup.md)**: AWS CLI and account configuration
-- **[IAM Setup](docs/iam-user-setup.md)**: IAM user creation and permissions
-- **[AWS CLI Installation](docs/aws-cli-installation.md)**: AWS CLI installation guide
-
-### Specialized Guides
-- **[Security Guide](docs/security.md)**: Security implementation and best practices
-- **[Storage Class Management](docs/storage-class-management.md)**: Cost optimization and storage class management
-- **[Testing Guide](docs/testing.md)**: Comprehensive testing framework
-
-### Development
-- **[Workflow](workflow.md)**: Documentation and development workflow directive
-- **[Style Guide](docs/documentation-style-guide.md)**: Documentation standards
+### Legacy and Utilities
+- [Legacy utilities and docs](docs/LEGACY.md)
 
 ## Certification Focus
 
@@ -304,27 +248,7 @@ aws configure list             # Show configuration
 
 ## Development Status
 
-### Completed ✅
-- IAM user setup with minimal permissions
-- S3 bucket creation with security features
-- CloudWatch monitoring integration
-- Core sync functionality with incremental sync
-- Storage class management with cost optimization
-- Configuration management and validation
-- Backup, restore, and cleanup utilities
-- Comprehensive test coverage
-- Educational documentation structure
-
-### In Progress 🔄
-- Enhanced monitoring and reporting
-- Advanced security features
-- Performance optimization
-
-### Planned 📋
-- Automated sync scheduling
-- Event-driven syncs
-- Advanced monitoring and alerting
-- Lambda function integration
+This repository now prioritizes the full‑screen TUI workflow and refactored core engine. Legacy utilities are maintained for compatibility and tests but are no longer the primary interface.
 
 ## Contributing
 
